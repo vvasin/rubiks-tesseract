@@ -1,0 +1,21 @@
+{
+  "name": "rubiks-tesseract",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Interactive WebGL 3×3×3×3 Rubik's tesseract. Vanilla JS + WebGL, no build step.",
+  "scripts": {
+    "start": "node scripts/serve.js",
+    "serve": "node scripts/serve.js",
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "lint": "eslint .",
+    "setup": "npm install && playwright install chromium"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.13.0",
+    "@playwright/test": "^1.48.0",
+    "eslint": "^9.13.0",
+    "globals": "^15.11.0"
+  }
+}
