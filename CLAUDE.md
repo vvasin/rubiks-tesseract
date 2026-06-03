@@ -64,6 +64,13 @@ canvas uses `preserveDrawingBuffer`, so it can be read back via a 2D canvas in t
 
 ## Projection model (`projection.js`) — read this before touching rendering
 
+> **Central tension:** a 4D rotation's 3D shadow can't be both a rigid constant-size
+> cube *and* smoothly reveal/hide the colors it swaps. We keep the cube rigid and pay
+> for the reveal in color, not shape. The long-form rationale, the collision analysis
+> behind the color fade, and the approaches we tried and dropped live in
+> [docs/model-notes.md](docs/model-notes.md) — read it before reworking the projection
+> or coloring.
+
 Two distinct 4D→3D projections coexist on purpose:
 
 **1. The core frame** `{ e:[e0,e1,e2], eF }` — three orthonormal "free" axes mapped to
@@ -142,3 +149,7 @@ gaps; the constant-size cube look is achieved by each cubie's own Schlegel proje
 the color fade above. If something here seems redundant or odd, it almost certainly fixes
 a specific visual artifact (color snaps, edge bleed, grazing-angle holes, all-black turns)
 — check git history / don't "simplify" it away without reproducing the artifact first.
+
+For the reasoning in full — the collision model the color fade is built on, and the
+approaches we tried and rejected (whole-cubie blackout, per-face fade) — see
+[docs/model-notes.md](docs/model-notes.md).
