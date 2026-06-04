@@ -117,7 +117,7 @@ export class Controls {
         this.app.startDemo();
         break;
       case 's': case 'S':
-        if (!e.shiftKey) this.app.scramble();
+        if (!e.shiftKey) this.app.toggleScramble();
         break;
       case 'u': case 'U':
         if (e.shiftKey) this.app.redo();

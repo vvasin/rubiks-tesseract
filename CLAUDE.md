@@ -145,9 +145,13 @@ behind it — no alpha blending, depth buffer untouched. Steady state needs no b
   `viewZoom` sets camera distance (`15/zoom`). View changes never touch puzzle state.
 - **Modes**: Regular (default) and Demo (auto-plays the 48 moves: 8 cells × 6 ×
   +90°/−90°, canonical order). Speed slider affects both.
+- **Scramble** (button / `S`) is a start/stop loop, not a one-shot: each round does
+  3–7 random side-cell turns on the current centre — only the plane that avoids the
+  depth axis, so never depth-involving — then recenters to a different cell, repeating
+  until stopped. The button toggles its label between `Scramble` and `Stop`.
 - **Keys**: `1–8` central cell · arrows rotate view · `Space` demo play/pause · `R` reset
-  puzzle · `V` reset view · `W` wireframe · `Esc` stop demo · `D` demo · `S` scramble ·
-  `U`/`Shift+U` undo/redo. Mouse drag orbits; wheel / two-finger pinch / ±buttons zoom.
+  puzzle · `V` reset view · `W` wireframe · `Esc` stop demo · `D` demo · `S` scramble
+  start/stop · `U`/`Shift+U` undo/redo. Mouse drag orbits; wheel / two-finger pinch / ±buttons zoom.
 
 ## Invariants to preserve
 

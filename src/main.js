@@ -7,6 +7,8 @@ import { AnimationEngine } from './animation.js';
 import { Controls, buildCellPanel, updateCentralBadge } from './controls.js';
 import { DemoMode } from './demo.js';
 
+const AXIS_LETTERS = ['X', 'Y', 'Z', 'W'];   // 4D axis index → plane-name letter
+
 class App {
   constructor() {
     this.cubies = buildSolvedPuzzle();
@@ -33,6 +35,9 @@ class App {
     this.demo = new DemoMode();
     this.demoSpeedFactor = 1.0;
 
+    this.scrambling = false;     // looping scramble on/off
+    this.scrambleQueue = [];     // pending actions for the current round
+
     this.canvas = document.getElementById('glcanvas');
     this.renderer = new Renderer(this.canvas);
 
@@ -57,6 +62,9 @@ class App {
         this._updateMoveCounter(move.demoIndex + 1);
       }
     }
+
+    // Drive scramble: feed the next action whenever the engine is idle.
+    if (this.scrambling && this.anim.isIdle()) this._scrambleStep();
 
     // Tick animation
     const frame = this.anim.tick(timestamp, this.cubies, this.centralCellIndex);
@@ -187,6 +195,7 @@ class App {
 
   resetPuzzle() {
     if (this.mode === 'demo') this.stopDemo();
+    this.stopScramble();
     this.anim.clearQueue();
     this.cubies = buildSolvedPuzzle();
     this.undoStack = [];
@@ -196,24 +205,61 @@ class App {
     this._updateMoveCounter();
   }
 
-  scramble() {
-    if (this.mode === 'demo') return;
-    if (this.anim.isBusy()) return;
-    const CELLS_COUNT = 8;
-    const planesPerCell = [
-      ['YZ','YW','ZW'], ['YZ','YW','ZW'],
-      ['XZ','XW','ZW'], ['XZ','XW','ZW'],
-      ['XY','XW','YW'], ['XY','XW','YW'],
-      ['XY','XZ','YZ'], ['XY','XZ','YZ'],
-    ];
-    for (let i = 0; i < 20; i++) {
-      const ci = Math.floor(Math.random() * CELLS_COUNT);
-      const planes = planesPerCell[ci];
-      const plane = planes[Math.floor(Math.random() * planes.length)];
-      const sign = Math.random() < 0.5 ? +1 : -1;
-      this.anim.queueMove(this.cubies, ci, plane, sign);
-    }
+  // ── Scramble (looping start/stop) ────────────────────────────────────────────
+
+  toggleScramble() { this.scrambling ? this.stopScramble() : this.startScramble(); }
+
+  startScramble() {
+    if (this.mode === 'demo') this.stopDemo();
+    this.scrambling = true;
+    this.scrambleQueue = [];
+    this._updateScrambleBtn();
     this._setStatus('Scrambling…');
+  }
+
+  stopScramble() {
+    if (!this.scrambling) return;
+    this.scrambling = false;
+    this.scrambleQueue = [];
+    this._updateScrambleBtn();
+    this._setStatus('Scramble stopped');
+  }
+
+  _updateScrambleBtn() {
+    const btn = document.getElementById('btn-scramble');
+    if (!btn) return;
+    btn.textContent = this.scrambling ? 'Stop' : 'Scramble';
+    btn.classList.toggle('active', this.scrambling);
+  }
+
+  // Fed once per idle frame: run one queued action, refilling a round when empty.
+  _scrambleStep() {
+    if (this.scrambleQueue.length === 0) this._planScrambleRound();
+    const act = this.scrambleQueue.shift();
+    if (!act) return;
+    if (act.type === 'move') this.anim.queueMove(this.cubies, act.cellIndex, act.plane, act.sign);
+    else this.selectCentralCell(act.cellIndex);
+  }
+
+  // One round: 3–7 clean side-cell turns on the current centre (never depth-involving),
+  // then recenter to a different cell.
+  _planScrambleRound() {
+    const centralAxis = CELLS[this.centralCellIndex].axis;
+    const others = [0, 1, 2, 3].filter(a => a !== centralAxis);   // the 3 non-depth axes
+    const n = 3 + Math.floor(Math.random() * 5);                  // 3..7
+    for (let i = 0; i < n; i++) {
+      const axis = others[Math.floor(Math.random() * 3)];         // a side-cell axis
+      const cellVal = Math.random() < 0.5 ? 1 : -1;
+      const cellIndex = CELLS.findIndex(c => c.axis === axis && c.val === cellVal);
+      // The only turn plane that avoids the depth axis: the two remaining non-central axes.
+      const [p, q] = others.filter(a => a !== axis);
+      const plane = AXIS_LETTERS[p] + AXIS_LETTERS[q];
+      const turnSign = Math.random() < 0.5 ? 1 : -1;
+      this.scrambleQueue.push({ type: 'move', cellIndex, plane, sign: turnSign });
+    }
+    let next = this.centralCellIndex;
+    while (next === this.centralCellIndex) next = Math.floor(Math.random() * 8);
+    this.scrambleQueue.push({ type: 'center', cellIndex: next });
   }
 
   // ── Demo mode ────────────────────────────────────────────────────────────────
@@ -275,7 +321,7 @@ class App {
     });
     document.getElementById('btn-reset-puzzle').addEventListener('click', () => this.resetPuzzle());
     document.getElementById('btn-reset-view').addEventListener('click', () => this.resetView());
-    document.getElementById('btn-scramble').addEventListener('click', () => this.scramble());
+    document.getElementById('btn-scramble').addEventListener('click', () => this.toggleScramble());
     document.getElementById('chk-wire').addEventListener('change', e => this.setWire(e.target.checked));
 
     document.getElementById('btn-undo').addEventListener('click', () => this.undo());

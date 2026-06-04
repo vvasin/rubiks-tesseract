@@ -44,7 +44,9 @@ test('survives turns, scramble, recenter, and wireframe without errors', async (
     a.anim.speedFactor = 4;                       // run animations fast for the test
     a.executeMove(2, 'XW', +1); await idle();     // depth-involving turn
     a.executeMove(0, 'YZ', -1); await idle();
-    a.scramble();               await idle();
+    a.startScramble();                             // looping scramble
+    await new Promise(r => setTimeout(r, 800));    // let it run a few rounds
+    a.stopScramble();           await idle();
     a.selectCentralCell(5);     await idle();      // recentering
     a.selectCentralCell(0);     await idle();
     a.setWire(true);
