@@ -1,9 +1,7 @@
 import { mat3Mul, mat3AxisRotation } from './math4d.js';
 import { buildSolvedPuzzle, undoMove, CELLS } from './puzzle.js';
-import {
-  computeCells, computeWireframe, computeCoreWireframe, frameForCell, cloneFrame, rotateFrame,
-  centeringPlan, centralFromFrame
-} from './projection.js';
+import { computeCells, computeWireframe, computeCoreWireframe, frameForCell, cloneFrame, rotateFrame,
+         centeringPlan, centralFromFrame } from './projection.js';
 import { Renderer } from './renderer.js';
 import { AnimationEngine } from './animation.js';
 import { Controls, buildCellPanel, updateCentralBadge } from './controls.js';
@@ -21,9 +19,9 @@ class App {
     // Turntable view: independent yaw (around world Y) and pitch (around screen X).
     // Keeping them as separate angles — rather than accumulating free rotations —
     // means horizontal drag never leaks into roll, so the puzzle stays upright.
-    this.viewYaw = -Math.PI / 5.5;      // ~33° → shows the right faces
-    this.viewPitch = Math.PI / 7;        // ~26° → shows the top faces
-    this.viewZoom = 1.0;                 // camera-distance multiplier
+    this.viewYaw   = -Math.PI / 5.5;      // ~33° → shows the right faces
+    this.viewPitch =  Math.PI / 7;        // ~26° → shows the top faces
+    this.viewZoom  = 1.0;                 // camera-distance multiplier
     this.viewRot = this._composeViewRot();
     this.mode = 'regular'; // 'regular' | 'demo'
 
@@ -88,7 +86,7 @@ class App {
       // All 8 core boxes are always shown; the turning cell spins with the move,
       // and the whole set rotates with the interpolated frame during recentering.
       const spinCell = frame && frame.type === 'move' ? frame.cellIndex : -1;
-      const spinR = frame && frame.type === 'move' ? frame.R : null;
+      const spinR    = frame && frame.type === 'move' ? frame.R : null;
       segments = segments.concat(
         computeCoreWireframe(coreFrame, [0, 1, 2, 3, 4, 5, 6, 7], spinCell, spinR));
     } else {
@@ -122,9 +120,9 @@ class App {
   }
 
   resetView() {
-    this.viewYaw = -Math.PI / 5.5;
-    this.viewPitch = Math.PI / 7;
-    this.viewZoom = 1.0;
+    this.viewYaw   = -Math.PI / 5.5;
+    this.viewPitch =  Math.PI / 7;
+    this.viewZoom  = 1.0;
     this.viewRot = this._composeViewRot();
   }
 
@@ -293,20 +291,25 @@ class App {
     else { this.demo.resume(); this._setStatus('Demo playing…'); }
   }
 
-  demoPrev() {
-    if (this.mode !== 'demo') return;
-    if (this.anim.isBusy()) return;
-    if (this.demo.index < 0) return; // nada para voltar
+// Hey, demoPrev() was only moving the index back but never actually
+// undoing the move on the puzzle, so the cubes stayed in the wrong
+// position. Fixed it by re-running the same move with inverted sign
+// (-move.sign) to reverse the rotation before stepping back. :] 
+// I <3 cubes.
+demoPrev() {
+  if (this.mode !== 'demo') return;
+  if (this.anim.isBusy()) return;
+  if (this.demo.index < 0) return;
 
-    const move = this.demo.sequence[this.demo.index];
-    if (move) {
-      this.anim.queueMove(this.cubies, move.cellIndex, move.planeName, -move.sign);
-    }
-
-    this.demo.pause();
-    this.demo.stepBackward();
-    this._updateMoveCounter(this.demo.index + 1);
+  const move = this.demo.sequence[this.demo.index];
+  if (move) {
+    this.anim.queueMove(this.cubies, move.cellIndex, move.planeName, -move.sign);
   }
+
+  this.demo.pause();
+  this.demo.stepBackward();
+  this._updateMoveCounter(this.demo.index + 1);
+}
 
   demoNext() {
     if (this.mode !== 'demo') return;
@@ -364,14 +367,14 @@ class App {
 
   _handleViewBtn(action) {
     const step = Math.PI / 18;
-    switch (action) {
-      case 'rotate-left': this.orbit(-step, 0); break;
-      case 'rotate-right': this.orbit(step, 0); break;
-      case 'rotate-up': this.orbit(0, -step); break;
-      case 'rotate-down': this.orbit(0, step); break;
-      case 'zoom-in': this.zoomBy(1.15); break;
-      case 'zoom-out': this.zoomBy(1 / 1.15); break;
-      case 'reset-view': this.resetView(); break;
+    switch(action) {
+      case 'rotate-left':  this.orbit(-step, 0); break;
+      case 'rotate-right': this.orbit( step, 0); break;
+      case 'rotate-up':    this.orbit(0, -step); break;
+      case 'rotate-down':  this.orbit(0,  step); break;
+      case 'zoom-in':      this.zoomBy(1.15); break;
+      case 'zoom-out':     this.zoomBy(1 / 1.15); break;
+      case 'reset-view':   this.resetView(); break;
     }
   }
 
@@ -391,7 +394,7 @@ class App {
   }
 }
 
-function easeInOut(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+function easeInOut(t) { return t < 0.5 ? 2*t*t : 1 - Math.pow(-2*t+2, 2)/2; }
 
 // Bootstrap
 window.addEventListener('DOMContentLoaded', () => {
