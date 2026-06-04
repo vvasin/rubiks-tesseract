@@ -291,12 +291,25 @@ class App {
     else { this.demo.resume(); this._setStatus('Demo playing…'); }
   }
 
-  demoPrev() {
-    if (this.mode !== 'demo') return;
-    this.demo.pause();
-    this.demo.stepBackward();
-    this._updateMoveCounter(this.demo.index + 1);
+// Hey, demoPrev() was only moving the index back but never actually
+// undoing the move on the puzzle, so the cubes stayed in the wrong
+// position. Fixed it by re-running the same move with inverted sign
+// (-move.sign) to reverse the rotation before stepping back. :] 
+// I <3 cubes.
+demoPrev() {
+  if (this.mode !== 'demo') return;
+  if (this.anim.isBusy()) return;
+  if (this.demo.index < 0) return;
+
+  const move = this.demo.sequence[this.demo.index];
+  if (move) {
+    this.anim.queueMove(this.cubies, move.cellIndex, move.planeName, -move.sign);
   }
+
+  this.demo.pause();
+  this.demo.stepBackward();
+  this._updateMoveCounter(this.demo.index + 1);
+}
 
   demoNext() {
     if (this.mode !== 'demo') return;
