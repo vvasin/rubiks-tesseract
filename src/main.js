@@ -37,6 +37,7 @@ class App {
 
     this.scrambling = false;     // looping scramble on/off
     this.scrambleQueue = [];     // pending actions for the current round
+    this.scrambleLastMove = null; // most recent scramble move (to avoid undoing it)
 
     this.canvas = document.getElementById('glcanvas');
     this.renderer = new Renderer(this.canvas);
@@ -213,6 +214,7 @@ class App {
     if (this.mode === 'demo') this.stopDemo();
     this.scrambling = true;
     this.scrambleQueue = [];
+    this.scrambleLastMove = null;   // fresh start → no restriction on the first move
     this._updateScrambleBtn();
     this._setStatus('Scrambling…');
   }
@@ -248,18 +250,30 @@ class App {
     const others = [0, 1, 2, 3].filter(a => a !== centralAxis);   // the 3 non-depth axes
     const n = 3 + Math.floor(Math.random() * 5);                  // 3..7
     for (let i = 0; i < n; i++) {
-      const axis = others[Math.floor(Math.random() * 3)];         // a side-cell axis
-      const cellVal = Math.random() < 0.5 ? 1 : -1;
-      const cellIndex = CELLS.findIndex(c => c.axis === axis && c.val === cellVal);
-      // The only turn plane that avoids the depth axis: the two remaining non-central axes.
-      const [p, q] = others.filter(a => a !== axis);
-      const plane = AXIS_LETTERS[p] + AXIS_LETTERS[q];
-      const turnSign = Math.random() < 0.5 ? 1 : -1;
-      this.scrambleQueue.push({ type: 'move', cellIndex, plane, sign: turnSign });
+      let move;
+      do {
+        const axis = others[Math.floor(Math.random() * 3)];       // a side-cell axis
+        const cellVal = Math.random() < 0.5 ? 1 : -1;
+        const cellIndex = CELLS.findIndex(c => c.axis === axis && c.val === cellVal);
+        // The only turn plane that avoids the depth axis: the two remaining non-central axes.
+        const [p, q] = others.filter(a => a !== axis);
+        const plane = AXIS_LETTERS[p] + AXIS_LETTERS[q];
+        const turnSign = Math.random() < 0.5 ? 1 : -1;
+        move = { type: 'move', cellIndex, plane, sign: turnSign };
+      } while (this._undoesLastMove(move));                       // never immediately cancel the previous turn
+      this.scrambleLastMove = move;
+      this.scrambleQueue.push(move);
     }
     let next = this.centralCellIndex;
     while (next === this.centralCellIndex) next = Math.floor(Math.random() * 8);
     this.scrambleQueue.push({ type: 'center', cellIndex: next });
+  }
+
+  // A move cancels the previous one if it's the same cell + plane with the opposite
+  // sign. (Recentering doesn't touch puzzle state, so this holds across rounds too.)
+  _undoesLastMove(m) {
+    const L = this.scrambleLastMove;
+    return !!L && m.cellIndex === L.cellIndex && m.plane === L.plane && m.sign === -L.sign;
   }
 
   // ── Demo mode ────────────────────────────────────────────────────────────────
