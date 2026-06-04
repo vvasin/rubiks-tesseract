@@ -34,11 +34,21 @@ varying vec3 v_normal;
 uniform vec3 u_lightDir;
 uniform float u_ambient;
 
+// Stable per-pixel hash for screen-door (dither) transparency.
+float hash12(vec2 p) {
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
+}
+
 void main() {
+  // Screen-door dissolve: keep each fragment with probability v_opacity, so a cubie
+  // fading from solid to wireframe sprouts holes that reveal the wireframe behind it.
+  if (v_opacity < 0.999 && hash12(floor(gl_FragCoord.xy)) >= v_opacity) discard;
   vec3 n = normalize(v_normal);
   // two-sided lighting so inner cell faces (revealed by morphing) still shade
   float diff = max(abs(dot(n, normalize(u_lightDir))), 0.0);
   vec3 lit = v_color * (u_ambient + (1.0 - u_ambient) * diff);
-  gl_FragColor = vec4(lit, v_opacity);
+  gl_FragColor = vec4(lit, 1.0);
 }
 `;

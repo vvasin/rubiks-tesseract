@@ -46,7 +46,7 @@ canvas uses `preserveDrawingBuffer`, so it can be read back via a 2D canvas in t
 - `src/animation.js` — `AnimationEngine`: move/centering queue, easing, per-frame state. `MOVE_DURATION=360ms`, `TRANSITION_DURATION=620ms`, `speedFactor`.
 - `src/controls.js` — mouse/touch/keyboard input; builds the per-cell control panel.
 - `src/demo.js` — `DemoMode`: sequenced playback of the 48 moves.
-- `src/shaders.js` — GLSL. Two-sided lambert (`abs(dot(n,light))`), `u_ambient=0.42`.
+- `src/shaders.js` — GLSL. Two-sided lambert (`abs(dot(n,light))`), `u_ambient=0.42`; screen-door (hashed) dither `discard` — keeps each fragment with probability `a_opacity`, for the solid→wireframe dissolve.
 - `scripts/serve.js` — zero-dep static dev server (sets ESM MIME types). `tests/` — Playwright specs. `playwright.config.js`, `eslint.config.js`, `package.json` — infra.
 
 ## Puzzle model (`puzzle.js`)
@@ -110,13 +110,29 @@ swap hands off black-to-black, *without* ever blacking the whole puzzle:
   crossover. The trade (accepted): the moving cell vs *stationary side* collisions still
   snap, but the puzzle is never all-black. Centering uses the symmetric settled fade.
 
+### Solid centre, wireframe shell (the default view)
+
+In normal (non-toggle) mode the **central cell renders solid; the 7 outer-layer cells
+render as wireframe** — the focused 3×3×3 reads as a clean Rubik's cube while the rest of
+the tesseract is see-through structure, not a wall of cubes. Per cubie,
+`solidWeight = smoothstep(0.4, 0.9, pos4·eF)` (1 = central layer, →0 outward); it slides
+continuously as the frame sweeps (centering) or a cubie crosses the layer (a turn whose
+plane includes the central axis). `computeCells` skips `sw≤0.02` cubies and tags faces
+with `opacity=sw`; `computeWireframe(…, skipSolid=true)` skips the solid (`sw≥0.98`) ones.
+The handoff is a **screen-door dither dissolve**: the shader keeps each fragment with
+probability `sw`, so a transitioning cubie's solid sprouts holes that reveal the wireframe
+behind it — no alpha blending, depth buffer untouched. Steady state needs no blending
+(every cubie is cleanly solid or wireframe).
+
 ### Other rendering facts
 
 - **No back-face culling** (`renderer.js`). The depth buffer handles occlusion; culling
   used to delete a face as it went edge-on, leaving see-through holes between the cubie's
   separate cell boxes. Removing it makes cubies stay solid at grazing angles.
 - `DARK=[0.10,0.10,0.13]` for non-sticker faces; background `[0.04,0.04,0.06]`.
-- **Wireframe mode** (toggle / `W`): `computeWireframe` draws each cubie cell as a shrunk
+- **Wireframe toggle** (`W`) — full-wireframe inspection, distinct from the default view's
+  outer shell above: replaces *everything* with wireframe. `computeWireframe` draws each
+  cubie cell as a shrunk
   cube outline; `computeCoreWireframe` draws the 8 core cells as cube outlines, *always
   visible*, the active cell spinning during a turn, all rotating during centering. The core
   cell corners sit exactly on the corner-cubie centers (`CORE_EXT=1`); side cells inset
@@ -144,9 +160,11 @@ swap hands off black-to-black, *without* ever blacking the whole puzzle:
 
 The original spec lives in git history. Key departures, all intentional:
 the cubies-as-pieces-of-one-core idea was dropped (looked crooked) for independent
-per-cubie tesseracts; transparency was abandoned for opaque depth-nesting with visible
-gaps; the constant-size cube look is achieved by each cubie's own Schlegel projection +
-the color fade above. If something here seems redundant or odd, it almost certainly fixes
+per-cubie tesseracts; transparency-as-translucent-fills was abandoned for opaque
+depth-nesting with visible gaps (a different see-through — wireframe outer layers with a
+dither dissolve — later returned for the default view; that's structural edges, not
+translucent fills); the constant-size cube look is achieved by each cubie's own Schlegel
+projection + the color fade above. If something here seems redundant or odd, it almost certainly fixes
 a specific visual artifact (color snaps, edge bleed, grazing-angle holes, all-black turns)
 — check git history / don't "simplify" it away without reproducing the artifact first.
 

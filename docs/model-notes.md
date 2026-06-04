@@ -170,3 +170,25 @@ transparency for depth (unreadable "translucent hell"); per-axis "lobe" renderin
 - **No back-face culling.** The depth buffer handles occlusion; culling deleted faces
   as they went edge-on, leaving see-through holes between a cubie's separate cell
   boxes. Safe to drop now that inner/outer cells are dark + shrunk behind the stickers.
+
+---
+
+## 8. Default view: solid centre, wireframe shell
+
+The full opaque render is a wall of cubes — the outer shells occlude the central cell you
+care about. So normal mode shows only the **central cell solid**; every outer-layer cubie
+becomes **wireframe**. This is the "transparency" the translucent-fills approach (§5)
+failed to deliver — but as structural *edges*, not blended fills, so it stays readable.
+
+`solidWeight = smoothstep(0.4, 0.9, pos4·eF)` is the central-ness: it's `pos4`'s depth
+along the central axis, already continuous through both events that change membership
+(centering sweeps `eF`; a layer-crossing turn moves the animated `center4`). In steady
+state every cubie is cleanly 0 or 1 — so **no blending is needed there**; only the
+mid-animation band has both representations at once.
+
+For that handoff we chose **screen-door dither** over an alpha cross-fade: the shader
+`discard`s fragments with probability `1−solidWeight`, so the fading solid pokes holes
+that reveal the wireframe (drawn just behind it, slightly shrunk). It needs no back-to-
+front sorting and leaves the opaque depth pipeline untouched — the alpha route would have
+re-introduced the sorting/blending fragility we spent §1–§7 avoiding. The dither pattern
+is screen-space and stable per pixel, so a cubie dissolves cleanly rather than sparkling.

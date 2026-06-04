@@ -62,6 +62,17 @@ function colorWeight(df, dft) {
   }
   return sideColorWeight(df);                                       // settled / stationary side
 }
+
+// How "solid" a cubie is vs wireframe (normal mode): the central cell renders solid,
+// the outer layers as wireframe. Driven by depth along the central axis,
+// d = pos4·eF (1 = central cell, 0/−1 = outer), which slides continuously as the
+// frame sweeps (centering) or the cubie moves across the layer (turns). The solid is
+// dithered away by this weight, revealing the wireframe underneath during the handoff.
+const SOLID_LO = 0.4, SOLID_HI = 0.9;
+function solidWeight(p, frame) {
+  return smoothstep(SOLID_LO, SOLID_HI, dot4(p, frame.eF));
+}
+
 const CORE_EXT = 1;                    // lattice half-extent: core cell corners sit on the
                                        // ±1 corner-cubie centres (projected identically)
 
@@ -209,10 +220,13 @@ export function computeCells(cubies, frame, getState = null) {
   cubies.forEach((cubie, i) => {
     if (isHidden(cubie.pos4)) return;
     const st = getState ? getState(i) : null;
+    const center4 = st ? st.center4 : cubie.pos4;
+    const sw = solidWeight(center4, frame);   // 0 = pure wireframe → skip the solid
+    if (sw <= 0.02) return;
     // Pass the committed orientation as the target so each cell knows whether it's
     // heading toward the side role (revealing) or toward inner/outer (hiding).
-    const { cubieC, boxes } = cubieBoxes(
-      cubie, st ? st.center4 : cubie.pos4, st ? st.orient : cubie.orient, frame, cubie.orient);
+    const { boxes } = cubieBoxes(
+      cubie, center4, st ? st.orient : cubie.orient, frame, cubie.orient);
     for (const bx of boxes) {
       const C8 = bx.C8, ctr = bx.ctr;
       const w = bx.color ? colorWeight(bx.df, bx.dft) : 0;
@@ -230,7 +244,7 @@ export function computeCells(cubies, frame, getState = null) {
         const fcz=(q[0][2]+q[1][2]+q[2][2]+q[3][2])*0.25 - ctr[2];
         let n = norm3(cross3(sub3(q[1],q[0]), sub3(q[2],q[0])));
         if (n[0]*fcx + n[1]*fcy + n[2]*fcz < 0) n = [-n[0],-n[1],-n[2]];
-        faces.push({ color, quad: q, normal: n, opacity: 1.0, sortDepth: 0 });
+        faces.push({ color, quad: q, normal: n, opacity: sw, sortDepth: 0 });
       }
     }
   });
@@ -250,12 +264,16 @@ function pushBoxEdges(out, C8, color, shrink) {
 
 // Wireframe render: every cubie cell as its own (slightly shrunk) cube wireframe,
 // coloured by its sticker cell or as "unused".
-export function computeWireframe(cubies, frame, getState = null) {
+export function computeWireframe(cubies, frame, getState = null, skipSolid = false) {
   const segs = [];
   cubies.forEach((cubie, i) => {
     if (isHidden(cubie.pos4)) return;
     const st = getState ? getState(i) : null;
-    const { boxes } = cubieBoxes(cubie, st ? st.center4 : cubie.pos4, st ? st.orient : cubie.orient, frame);
+    const center4 = st ? st.center4 : cubie.pos4;
+    // In normal mode the central cell is solid, so skip its wireframe; the toggle
+    // mode (skipSolid=false) shows every cubie as wireframe.
+    if (skipSolid && solidWeight(center4, frame) >= 0.98) return;
+    const { boxes } = cubieBoxes(cubie, center4, st ? st.orient : cubie.orient, frame);
     for (const bx of boxes) pushBoxEdges(segs, bx.C8, bx.color || WIRE_UNUSED, WIRE_SHRINK);
   });
   return segs;

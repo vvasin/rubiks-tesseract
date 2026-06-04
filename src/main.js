@@ -82,7 +82,10 @@ class App {
       segments = segments.concat(
         computeCoreWireframe(coreFrame, [0, 1, 2, 3, 4, 5, 6, 7], spinCell, spinR));
     } else {
+      // Normal mode: the central cell renders solid (dithered), the outer layers
+      // render as wireframe, with a screen-door dissolve across the handoff.
       cells = computeCells(this.cubies, coreFrame, getState);
+      segments = computeWireframe(this.cubies, coreFrame, getState, true);
     }
 
     this.renderer.draw(cells, this.viewRot, segments, 15 / this.viewZoom);
