@@ -130,6 +130,88 @@ test('persists puzzle, central cell, and settings across a reload', async ({ pag
   expect(errors).toEqual([]);
 });
 
+test('swipe across the centred cube turns a layer; background swipe orbits', async ({ page }) => {
+  const errors = await gotoApp(page);
+
+  // The interaction surface tracks the projection: ~27 visible stickers on the 3 front faces.
+  const meta = await page.evaluate(() => {
+    const st = window.__app.centralStickers();
+    return { count: st.length, faces: [...new Set(st.map(s => s.a + ':' + s.sa))].length };
+  });
+  expect(meta.count).toBeGreaterThanOrEqual(24);
+  expect(meta.count).toBeLessThanOrEqual(27);
+  expect(meta.faces).toBe(3);
+
+  // A drag from one sticker to an in-line neighbour issues a layer turn.
+  const pts = await page.evaluate(() => {
+    const st = window.__app.centralStickers();
+    const ctr = s => { let x = 0, y = 0; for (const p of s.poly) { x += p.x; y += p.y; } return { x: x / 4, y: y / 4 }; };
+    for (const s of st) for (const o of st) {
+      if (o === s || o.a !== s.a || o.sa !== s.sa) continue;
+      const d0 = o.g[s.t[0]] - s.g[s.t[0]], d1 = o.g[s.t[1]] - s.g[s.t[1]];
+      if ((Math.abs(d0) === 1) !== (Math.abs(d1) === 1)) return { from: ctr(s), to: ctr(o) };
+    }
+    return null;
+  });
+  expect(pts).not.toBeNull();
+
+  const before = await page.evaluate(() => JSON.stringify(window.__app.cubies.map(c => [...c.pos4])));
+  await page.mouse.move(pts.from.x, pts.from.y);
+  await page.mouse.down();
+  await page.mouse.move((pts.from.x + pts.to.x) / 2, (pts.from.y + pts.to.y) / 2);
+  await page.mouse.move(pts.to.x, pts.to.y);
+  await page.mouse.up();
+  await page.waitForTimeout(700);
+  const afterTurn = await page.evaluate(() => JSON.stringify(window.__app.cubies.map(c => [...c.pos4])));
+  expect(afterTurn).not.toBe(before);
+
+  // A drag starting on the background (a stage corner) orbits the view and leaves the puzzle alone.
+  const bg = await page.evaluate(() => {
+    const r = document.getElementById('stage').getBoundingClientRect();
+    return { x: r.left + 6, y: r.top + 6, yaw: window.__app.viewYaw };
+  });
+  await page.mouse.move(bg.x, bg.y);
+  await page.mouse.down();
+  await page.mouse.move(bg.x + 60, bg.y + 30);
+  await page.mouse.up();
+  const res = await page.evaluate(() => ({
+    yaw: window.__app.viewYaw,
+    cubies: JSON.stringify(window.__app.cubies.map(c => [...c.pos4])),
+  }));
+  expect(res.yaw).not.toBe(bg.yaw);
+  expect(res.cubies).toBe(afterTurn);   // orbit didn't move the puzzle
+  expect(errors).toEqual([]);
+});
+
+test('a swipe that exits the start sticker off the cube still turns (exit-direction model)', async ({ page }) => {
+  const errors = await gotoApp(page);
+  await page.evaluate(() => window.__app.resetPuzzle());
+
+  // Start on a face-centre sticker and drag straight outward, ending well OUTSIDE the cube
+  // (and outside any sticker). The exit edge alone should resolve the turn.
+  const sw = await page.evaluate(() => {
+    const st = window.__app.centralStickers();
+    const s = st.find(x => x.g[x.t[0]] === 0 && x.g[x.t[1]] === 0) || st[0];   // a face centre
+    const ctr = p => ({ x: (p[0].x + p[1].x + p[2].x + p[3].x) / 4, y: (p[0].y + p[1].y + p[2].y + p[3].y) / 4 });
+    const c = ctr(s.poly);
+    // +t0 screen direction (opposite edge midpoints); push 4× a cell out, far past the cube.
+    const ux = (s.poly[1].x + s.poly[2].x - s.poly[0].x - s.poly[3].x) / 2;
+    const uy = (s.poly[1].y + s.poly[2].y - s.poly[0].y - s.poly[3].y) / 2;
+    return { cx: c.x, cy: c.y, ex: c.x + ux * 4, ey: c.y + uy * 4 };
+  });
+
+  const before = await page.evaluate(() => JSON.stringify(window.__app.cubies.map(c => [...c.pos4])));
+  await page.mouse.move(sw.cx, sw.cy);
+  await page.mouse.down();
+  await page.mouse.move((sw.cx + sw.ex) / 2, (sw.cy + sw.ey) / 2);
+  await page.mouse.move(sw.ex, sw.ey);
+  await page.mouse.up();
+  await page.waitForTimeout(700);
+  const after = await page.evaluate(() => JSON.stringify(window.__app.cubies.map(c => [...c.pos4])));
+  expect(after).not.toBe(before);
+  expect(errors).toEqual([]);
+});
+
 test('captures reference screenshots', async ({ page }) => {
   await gotoApp(page);
   await mkdir(SHOTS, { recursive: true });

@@ -6,9 +6,10 @@ the 4D puzzle *readable* through an interactive 3D projection — there is no so
 
 The screen is **9 synchronized views**: the big main tesseract projection plus 8 small
 cell sub-views (4 top + 4 bottom), each showing one cell as a plain 3×3×3 Rubik's cube.
-You twist the **centred** cell with on-canvas icon buttons (layer turns + whole-cube
-rotation, in groups around the cube), and tap a sub-view to bring a different cell to
-centre. All 9 views share one turntable orientation.
+You twist the **centred** cell by **swiping across it** in the main view (the primary input)
+or with on-canvas icon buttons (layer turns + whole-cube rotation, in groups around the
+cube), and tap a sub-view to bring a different cell to centre. All 9 views share one
+turntable orientation.
 
 This file is the orientation for a future session. It records the **current** design and
 the non-obvious decisions behind it; it is not the original spec (we diverged from that
@@ -35,6 +36,8 @@ a.viewYaw = -0.6; a.viewPitch = 0.5; a.viewZoom = 1.4; a.viewRot = a._composeVie
 a.anim.speedFactor = 0.1;           // slow animations down to capture mid-transition
 a.executeMove(2, 'XW', +1);         // cellIndex, planeName, sign (any cell/plane)
 a.turnScreenPlane(0, 2, +1);        // twist the CENTRED cell via a screen-plane button (iIdx,jIdx,dir)
+a.centralStickers();                // the ≤27 swipe hit-areas (client-px quads) of the centred cube
+a.applyCentralSwipe(start, x, y);   // turn the layer a swipe from sticker `start` exits toward (x,y)
 a.selectCentralCell(4);             // animated, stable recentering
 a.shuffle();                        // one-shot scramble (SHUFFLE_TURNS moves, full speed)
 a.setViewMode('total-wire');        // 'shell-wire' | 'total-wire'
@@ -53,7 +56,7 @@ canvas uses `preserveDrawingBuffer`, so it can be read back via a 2D canvas in t
 - `src/projection.js` — **the heart**: 4D→3D projection, cubie geometry, color fade, wireframes, canonical frames + `slerpFrame`, and `computeCellCube` (one cell as a solid cube, for sub-views). Almost all design decisions live here.
 - `src/renderer.js` — WebGL: opaque, depth-tested, **no back-face culling**. `beginFrame()` clears the whole canvas; `drawView(cells, viewRot, segments, camDist, rect, zoom)` renders one scissored viewport (`zoom` crops/magnifies without moving the camera) — called once per view.
 - `src/animation.js` — `AnimationEngine`: move / middle-slice / centering queue, easing, per-frame state (per-cubie net sign for slices). `MOVE_DURATION=360ms`, `TRANSITION_DURATION=620ms`, `speedFactor`.
-- `src/controls.js` — unified pointer input (drag orbits all views, tap on a tile centres that cell, pinch zoom) + keyboard; builds the cell tiles (`buildCellTiles`) and the 4 twist-button groups around the cube (`buildTurnControls`), shown/hidden by `setControlSet`.
+- `src/controls.js` — unified pointer input: a drag that starts on a centred-cube sticker is a **layer swipe** (resolved via `App.centralStickers`/`applyCentralSwipe`) and never orbits; a drag that starts on the background or a cell tile orbits all views; tap a tile to centre that cell; pinch zoom. Plus keyboard; builds the cell tiles (`buildCellTiles`) and the 4 twist-button groups around the cube (`buildTurnControls`), shown/hidden by `setControlSet`.
 - `src/icons.js` — twist-button SVG icons, reconstructed in code from 4 hand-crafted base glyphs (full-cube / top / middle / bottom slab — a CCW rotation about the vertical axis) and derived by transform: opposite direction = mirror, other axis = rotate 120°/240° (the iso cube is 3-fold symmetric). Vertical axis = screen-Y. `turnIcon`/`TURN_BUTTONS` (cube rotation, `full`), `faceIcon` (outer `top`/`bottom` slab), `middleIcon` (middle slab). Arrow uses the accent colour; the cube uses `currentColor`.
 - `src/shaders.js` — GLSL. Two-sided lambert (`abs(dot(n,light))`), `u_ambient=0.42`; screen-door (hashed) dither `discard` — keeps each fragment with probability `a_opacity`, for the solid→wireframe dissolve.
 - `src/persistence.js` — `localStorage` read/write (best-effort: any storage/parse failure is swallowed) + a `debounce(fn, ms)` helper with `.flush()`. See "Persistence" below.
@@ -174,7 +177,8 @@ behind it — no alpha blending, depth buffer untouched. Steady state needs no b
   perspective as the main view). View changes never touch puzzle state.
 - **Turning**: all moves act on the **centred** cube; to work on another cell, tap its
   sub-view to centre it first. Buttons sit in **4 groups framing the cube** (Settings →
-  Controls picks which show: `sides` (default) / `central` / `both`):
+  Controls picks which show: `central` (default) / `sides` / `both` / `none` (zen — hide all,
+  twist by swiping)):
   - **bottom** — whole-cube rotation (`turnScreenPlane`): rotate the centred cell, 3 screen
     axes × 2 = 6.
   - **top / left / right** — per-axis **layer turns** (screen Y / X / Z), each = 3 slabs ×
@@ -187,6 +191,23 @@ behind it — no alpha blending, depth buffer untouched. Steady state needs no b
   `(planeName, sign)`. `_screenPlaneMove` includes a permutation-parity factor so `dir=+1` is
   always a right-handed CCW turn about the +screen axis (matching the icon arrow) — without it
   the Y plane (0,2), being cyclically odd, comes out inverted.
+- **Swipe to turn** (`App.centralStickers` / `applyCentralSwipe`, driven by `controls.js`): the
+  same layer turns are also reachable by **dragging across the centred cube** directly. Because
+  a central-cell cubie always projects to a clean grid (`pos4·eF = 1` → `depthR(1)=1.35`
+  constant), the 3×3×3 is modelled as an idealized cube and its ≤27 visible stickers are
+  projected to client pixels through the renderer's *exact* camera (frame, yaw/pitch, zoom).
+  Back-facing and below-threshold (`MIN_STICKER_FRAC`, edge-on) stickers are dropped, leaving the
+  clearly-targetable ones. **The turn is fixed by which EDGE of the start sticker the swipe exits
+  through** — `applyCentralSwipe` expresses the displacement from the sticker centre in that
+  sticker's in-face tangent basis (read perspective-correctly off its projected quad); the
+  dominant tangent is the drag axis, the *other* tangent is the rotation axis, the start's coord
+  along it is the slab (0 → `turnMiddle`, ±1 → `turnFace`), and the sign makes the grabbed sticker
+  travel the way the finger went — reusing the exact same move/sign machinery as the buttons.
+  Keying off the exit edge (not a second sticker) is deliberate: it cleanly handles a swipe that
+  **wraps over a cube edge onto another face of the same cubie** (the literal corner case) and one
+  that **runs off into empty space**. **Press-time decides the gesture:** a drag begun on a sticker
+  only ever turns — it never orbits, and if it never leaves the start sticker it's simply ignored;
+  a drag begun on the background/tiles orbits as before.
 - **Middle slice** (`turnMiddle` → `executeMiddleMove`): rotate the whole **`fAxis=0`
   hyper-slab** — every cubie with `pos4[fAxis]=0` (27: the centred cube's middle layer + the
   adjacent cells' middle slices in that plane), in the slice plane. It's the slab *between*
@@ -200,11 +221,12 @@ behind it — no alpha blending, depth buffer untouched. Steady state needs no b
 - **Shuffle** (menu) is a **one-shot**: `SHUFFLE_TURNS` (20) clean side-cell turns on the
   current centre — only the plane that avoids the depth axis, so never depth-involving —
   recentering between rounds, run at full speed regardless of the speed slider.
-- **Menu**: Shuffle · Reset (confirm) · Settings (animation speed; Controls = Layer turns /
-  Cube rotation / Both; View mode = Solid `shell-wire` / Wireframe `total-wire`).
+- **Menu**: Shuffle · Reset (confirm) · Settings (animation speed; Controls = Cube rotation
+  (default) / Layer turns / Both / None; View mode = Solid `shell-wire` / Wireframe `total-wire`).
 - **Keys** (desktop convenience): `1–8` centre cell · arrows rotate view · `R` reset puzzle
-  · `V` reset view · `W` cycle view mode · `U`/`Shift+U` undo/redo. Pointer drag (anywhere)
-  orbits; tap a sub-view tile to centre it; wheel / two-finger pinch zoom.
+  · `V` reset view · `W` cycle view mode · `U`/`Shift+U` undo/redo. Pointer drag on the
+  centred cube swipes a layer (above); drag on the background/tiles orbits; tap a sub-view
+  tile to centre it; wheel / two-finger pinch zoom.
 
 ## Persistence (`persistence.js` + `App`)
 

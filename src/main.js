@@ -1,4 +1,4 @@
-import { mat3Mul, mat3AxisRotation } from './math4d.js';
+import { mat3Mul, mat3AxisRotation, mat3MulVec3 } from './math4d.js';
 import { buildSolvedPuzzle, undoMove, CELLS, serializeCubies, restoreCubies } from './puzzle.js';
 import { readState, writeState, debounce } from './persistence.js';
 import { computeCells, computeCellCube, computeWireframe, computeCoreWireframe,
@@ -16,7 +16,19 @@ const SHUFFLE_TURNS = 20;                      // moves per Shuffle
 const SHUFFLE_SPEED = 2.0;                     // Shuffle always runs at full speed
 const SAVE_DEBOUNCE = 500;                     // ms to coalesce persistence writes
 const VIEW_MODES    = ['shell-wire', 'total-wire'];
-const CONTROL_SETS  = ['sides', 'central', 'both'];
+const CONTROL_SETS  = ['central', 'sides', 'both', 'none'];   // 'none' = zen mode (no buttons)
+
+// Direct-manipulation swipe (turn the centred cube by dragging across its stickers).
+// A central-cell cubie always projects to a clean grid: pos4·eF = 1 → depthR(1) = 1.35
+// constant, so its free-axis coords land at (g·1.35) along screen x/y/z. We model the
+// centred 3×3×3 as that idealized cube and project it through the renderer's exact camera.
+const STICKER_GRID  = 1.35;                  // central-cube cubie spacing in projected 3D
+const STICKER_HALF  = STICKER_GRID / 2;      // half a cell → stickers tile continuously
+const STICKER_FOV   = Math.PI / 3.2;         // must match renderer's perspective FOV
+const MIN_STICKER_FRAC = 0.0006;             // drop stickers smaller than this fraction of the
+                                             // main-view area (edge-on / heavily foreshortened);
+                                             // ~0.0006 keeps all 27 readable at rest, dropping only
+                                             // slivers as a face turns toward edge-on
 
 const isCellIndex = v => Number.isInteger(v) && v >= 0 && v < 8;
 
@@ -32,7 +44,7 @@ class App {
     this.subFrames = CELLS.map((_, i) => frameForCell(i));   // fixed canonical frame per sub-view
     this.pendingCenter = null;                 // active centering { fromFrame, toFrame, toCi }
     this.viewMode = VIEW_MODES.includes(saved?.viewMode) ? saved.viewMode : 'shell-wire';
-    this.controlSet = CONTROL_SETS.includes(saved?.controlSet) ? saved.controlSet : 'sides';
+    this.controlSet = CONTROL_SETS.includes(saved?.controlSet) ? saved.controlSet : 'central';
 
     // Turntable view: independent yaw/pitch so horizontal drag never leaks into roll.
     this.viewYaw   = -Math.PI / 5.5;
@@ -259,6 +271,91 @@ class App {
     this.markDirty();
   }
 
+  // ── Direct manipulation: swipe across the centred cube to turn a layer ─────────
+
+  // The interaction surface: up to 27 sticker quads of the centred 3×3×3, projected to
+  // CLIENT pixels through the renderer's exact camera (so it tracks orientation + zoom).
+  // Each sticker carries its grid coord `g` (∈{-1,0,1}³ along screen x/y/z), the face it
+  // lives on (axis `a`, sign `sa`), the two in-face tangent axes `t`, and its screen depth
+  // `zc` (smaller = nearer). Back-facing and heavily-foreshortened faces are dropped, so a
+  // swipe only ever lands on a clearly-visible sticker. Returns [] while busy (no geometry
+  // to twist mid-animation) — the caller then falls back to orbiting.
+  centralStickers() {
+    if (this.anim.isBusy() || this.pendingCenter) return [];
+    const rect = this.stageEl.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) return [];
+    const aspect = rect.width / rect.height;
+    const fcam = 1 / Math.tan(STICKER_FOV / 2);
+    const camDist = MAIN_CAM / this.viewZoom;
+    const R = this.viewRot;
+    const proj = (p) => {
+      const w = mat3MulVec3(R, p);
+      const inv = 1 / (camDist - w[2]);                 // perspective divide (clip.w = camDist − z)
+      return {
+        x: rect.left + (fcam / aspect * w[0] * inv * 0.5 + 0.5) * rect.width,
+        y: rect.top  + (0.5 - fcam * w[1] * inv * 0.5) * rect.height,
+        zc: camDist - w[2],
+      };
+    };
+    const minArea = rect.width * rect.height * MIN_STICKER_FRAC;
+    const out = [];
+    for (let a = 0; a < 3; a++) for (const sa of [1, -1]) {
+      const [t0, t1] = [0, 1, 2].filter(x => x !== a);
+      const nWorld = mat3MulVec3(R, axisVec(a, sa));    // face normal, view-rotated
+      for (let u = -1; u <= 1; u++) for (let v = -1; v <= 1; v++) {
+        const g = [0, 0, 0]; g[a] = sa; g[t0] = u; g[t1] = v;
+        const fc = [g[0] * STICKER_GRID, g[1] * STICKER_GRID, g[2] * STICKER_GRID];
+        fc[a] += sa * STICKER_HALF;                     // out to the cube surface
+        const cWorld = mat3MulVec3(R, fc);
+        const toCam = [-cWorld[0], -cWorld[1], camDist - cWorld[2]];
+        if (nWorld[0]*toCam[0] + nWorld[1]*toCam[1] + nWorld[2]*toCam[2] <= 0) continue;  // back-facing
+        const poly = [[-1,-1],[1,-1],[1,1],[-1,1]].map(([du, dv]) => {
+          const c = fc.slice(); c[t0] += du * STICKER_HALF; c[t1] += dv * STICKER_HALF;
+          return proj(c);
+        });
+        if (polyArea2(poly) < minArea) continue;        // edge-on / too small to target
+        out.push({ g, a, sa, t: [t0, t1], poly, zc: proj(fc).zc });
+      }
+    }
+    return out;
+  }
+
+  // Resolve a swipe into a layer turn from the start sticker plus the point `(x, y)` the
+  // finger has reached — specifically, which EDGE of the start sticker the swipe exits
+  // through. That single piece of information is enough and sidesteps two awkward cases of
+  // a "two-sticker" scheme: a swipe that wraps over a cube edge onto another face of the
+  // same cubie, and one that runs off into empty space — both still classify cleanly.
+  //
+  // We express the displacement from the sticker centre in the sticker's own in-face
+  // tangent basis (read perspective-correctly off its projected quad): components `a0`,`a1`
+  // along +t0,+t1 in cell units. The dominant one is the drag axis; the OTHER tangent is the
+  // rotation axis; `start`'s coord along it is the slab; its sign fixes the turn direction so
+  // the grabbed sticker travels the way the finger went. Returns true iff a turn was issued.
+  applyCentralSwipe(start, x, y) {
+    const [t0, t1] = start.t, c = start.poly;
+    const cx = (c[0].x + c[1].x + c[2].x + c[3].x) / 4;
+    const cy = (c[0].y + c[1].y + c[2].y + c[3].y) / 4;
+    // Screen-space directions of +t0 and +t1 (opposite edge midpoints of the quad).
+    const ux = (c[1].x + c[2].x - c[0].x - c[3].x) / 2, uy = (c[1].y + c[2].y - c[0].y - c[3].y) / 2;
+    const vx = (c[2].x + c[3].x - c[0].x - c[1].x) / 2, vy = (c[2].y + c[3].y - c[0].y - c[1].y) / 2;
+    const det = ux * vy - uy * vx;
+    if (Math.abs(det) < 1e-6) return false;
+    const dx = x - cx, dy = y - cy;
+    const a0 = (dx * vy - dy * vx) / det;     // exit component along +t0
+    const a1 = (ux * dy - uy * dx) / det;     // exit component along +t1
+    const useT0 = Math.abs(a0) >= Math.abs(a1);
+    const delta = Math.sign(useT0 ? a0 : a1);
+    if (!delta) return false;
+    const tIdx = useT0 ? t0 : t1;             // axis the drag ran along
+    const r    = useT0 ? t1 : t0;             // rotation axis = the other tangent
+    const cr = cross3v(axisVec(r, 1), axisVec(start.a, start.sa));   // r̂ × n̂: the face's drift dir
+    const dir = delta * Math.sign(cr[tIdx]);
+    const slab = start.g[r];
+    if (slab === 0) this.turnMiddle(r, dir);
+    else this.turnFace(r, slab, dir);
+    return true;
+  }
+
   executeMove(cellIndex, planeName, sign) {
     if (this.anim.moveQueue.length >= 3) return;   // queue up to 3 ahead
     this.anim.queueMove(this.cubies, cellIndex, planeName, sign);
@@ -469,6 +566,23 @@ class App {
       radio.addEventListener('change', e => { if (e.target.checked) this.setControlSet(e.target.value); });
     }
   }
+}
+
+// A signed unit 3-vector along one screen axis.
+function axisVec(axis, sign) { const v = [0, 0, 0]; v[axis] = sign; return v; }
+
+function cross3v(a, b) {
+  return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+}
+
+// Twice the signed area of a screen polygon (shoelace) — magnitude only, for thresholding.
+function polyArea2(poly) {
+  let s = 0;
+  for (let i = 0, n = poly.length; i < n; i++) {
+    const p = poly[i], q = poly[(i + 1) % n];
+    s += p.x * q.y - q.x * p.y;
+  }
+  return Math.abs(s) / 2;
 }
 
 function nonzeroAxis(v) {
