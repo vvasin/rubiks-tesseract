@@ -1,5 +1,6 @@
 import { mat3Mul, mat3AxisRotation } from './math4d.js';
-import { buildSolvedPuzzle, undoMove, CELLS } from './puzzle.js';
+import { buildSolvedPuzzle, undoMove, CELLS, serializeCubies, restoreCubies } from './puzzle.js';
+import { readState, writeState, debounce } from './persistence.js';
 import { computeCells, computeCellCube, computeWireframe, computeCoreWireframe,
          frameForCell, cloneFrame, slerpFrame, centralFromFrame } from './projection.js';
 import { Renderer } from './renderer.js';
@@ -13,16 +14,25 @@ const SUBVIEW_ZOOM = 2.4;                     // sub-views share the main camera
                                              // for zoom 1; sub-cubes scale with the main zoom.
 const SHUFFLE_TURNS = 20;                      // moves per Shuffle
 const SHUFFLE_SPEED = 2.0;                     // Shuffle always runs at full speed
+const SAVE_DEBOUNCE = 500;                     // ms to coalesce persistence writes
+const VIEW_MODES    = ['shell-wire', 'total-wire'];
+const CONTROL_SETS  = ['sides', 'central', 'both'];
+
+const isCellIndex = v => Number.isInteger(v) && v >= 0 && v < 8;
 
 class App {
   constructor() {
+    // Restore the previous session (puzzle, central cell, settings) if one was saved.
+    const saved = readState();
+
     this.cubies = buildSolvedPuzzle();
-    this.centralCellIndex = 0;
-    this.coreFrame = frameForCell(0);          // explicit 4D core orientation
+    if (saved && !restoreCubies(this.cubies, saved.cubies)) this.cubies = buildSolvedPuzzle();
+    this.centralCellIndex = isCellIndex(saved?.central) ? saved.central : 0;
+    this.coreFrame = frameForCell(this.centralCellIndex);    // explicit 4D core orientation
     this.subFrames = CELLS.map((_, i) => frameForCell(i));   // fixed canonical frame per sub-view
     this.pendingCenter = null;                 // active centering { fromFrame, toFrame, toCi }
-    this.viewMode = 'shell-wire';              // 'shell-wire' | 'total-wire' | 'semi'(disabled)
-    this.controlSet = 'sides';                 // 'central' | 'sides' | 'both'
+    this.viewMode = VIEW_MODES.includes(saved?.viewMode) ? saved.viewMode : 'shell-wire';
+    this.controlSet = CONTROL_SETS.includes(saved?.controlSet) ? saved.controlSet : 'sides';
 
     // Turntable view: independent yaw/pitch so horizontal drag never leaks into roll.
     this.viewYaw   = -Math.PI / 5.5;
@@ -55,6 +65,15 @@ class App {
 
     this.controls = new Controls(this.canvas, this);
     this._bindUI();
+    this._restoreSettingsUI(saved);
+
+    // Persistence: debounced writes coalesce bursts of turns / a shuffle into one save,
+    // and a pagehide flush captures the last move before the tab is backgrounded/closed.
+    this._scheduleSave = debounce(() => writeState(this._serialize()), SAVE_DEBOUNCE);
+    window.addEventListener('pagehide', () => this._scheduleSave.flush());
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') this._scheduleSave.flush();
+    });
 
     window.addEventListener('resize', () => this.markDirty());
     window.addEventListener('orientationchange', () => this.markDirty());
@@ -171,6 +190,7 @@ class App {
     this.anim.queueCentralCell(this.centralCellIndex, cellIndex);
     this.centralCellIndex = cellIndex;
     setCenteredTile(cellIndex);
+    this._scheduleSave?.();
     this.markDirty();
   }
 
@@ -179,6 +199,7 @@ class App {
     this.coreFrame = this.pendingCenter.toFrame;     // commit the exact canonical frame
     this.centralCellIndex = centralFromFrame(this.coreFrame);
     this.pendingCenter = null;
+    this._scheduleSave?.();
     this.markDirty();
   }
 
@@ -250,6 +271,7 @@ class App {
       this.undoStack.push(descriptor);
       if (this.undoStack.length > 100) this.undoStack.shift();
     }
+    this._scheduleSave?.();
     this.markDirty();
   }
 
@@ -258,6 +280,7 @@ class App {
     const desc = this.undoStack.pop();
     undoMove(this.cubies, desc);
     this.redoStack.push(desc);
+    this._scheduleSave?.();
     this.markDirty();
   }
 
@@ -275,6 +298,7 @@ class App {
     this.cubies = buildSolvedPuzzle();
     this.undoStack = [];
     this.redoStack = [];
+    this._scheduleSave?.();
     this.markDirty();
   }
 
@@ -349,6 +373,7 @@ class App {
     this.viewMode = mode;
     const radio = document.querySelector(`input[name="viewmode"][value="${mode}"]`);
     if (radio) radio.checked = true;
+    this._scheduleSave?.();
     this.markDirty();
   }
 
@@ -359,6 +384,41 @@ class App {
   setControlSet(set) {
     this.controlSet = set;
     setControlSet(set);                        // module helper: show/hide the button groups
+    this._scheduleSave?.();
+  }
+
+  // ── Persistence ───────────────────────────────────────────────────────────────
+
+  // Snapshot of everything that should outlive a refresh: the puzzle (mutable cubie
+  // fields), the centred cell, and the menu settings. View orientation is deliberately
+  // not persisted — it's transient, and resetting it on reload feels natural.
+  _serialize() {
+    return {
+      cubies: serializeCubies(this.cubies),
+      central: this.centralCellIndex,
+      viewMode: this.viewMode,
+      controlSet: this.controlSet,
+      speed: parseInt(document.getElementById('speed-slider').value),
+    };
+  }
+
+  // Reflect restored settings into the menu controls (and the animation speed). The puzzle,
+  // central cell, view mode and control set were already applied in the constructor; this
+  // only syncs the on-screen inputs and the speed factor.
+  _restoreSettingsUI(saved) {
+    const setRadio = (name, value) => {
+      const r = document.querySelector(`input[name="${name}"][value="${value}"]`);
+      if (r) r.checked = true;
+    };
+    setRadio('viewmode', this.viewMode);
+    setRadio('controlset', this.controlSet);
+
+    const slider = document.getElementById('speed-slider');
+    const speed = saved?.speed;
+    if (Number.isInteger(speed) && speed >= +slider.min && speed <= +slider.max) {
+      slider.value = speed;
+      this.anim.speedFactor = speed / 5;
+    }
   }
 
   // ── UI binding ───────────────────────────────────────────────────────────────
@@ -400,6 +460,7 @@ class App {
 
     document.getElementById('speed-slider').addEventListener('input', e => {
       this.anim.speedFactor = parseInt(e.target.value) / 5;   // 5 = 1×
+      this._scheduleSave?.();
     });
     for (const radio of document.querySelectorAll('input[name="viewmode"]')) {
       radio.addEventListener('change', e => { if (e.target.checked) this.setViewMode(e.target.value); });

@@ -77,6 +77,59 @@ test('central-cell switching is stable (returns to the same orientation)', async
   expect(stable).toBe(true);
 });
 
+test('persists puzzle, central cell, and settings across a reload', async ({ page }) => {
+  const errors = await gotoApp(page);
+  // Mutate every persisted facet, then let the debounced save flush on reload.
+  const before = await page.evaluate(async () => {
+    const a = window.__app;
+    const settled = () => new Promise(r => {
+      const t = setInterval(() => {
+        if (a.anim.isIdle() && !a.shuffling && !a.pendingCenter) { clearInterval(t); r(); }
+      }, 25);
+    });
+    a.anim.speedFactor = 4;
+    a.executeMove(2, 'XW', +1); await settled();
+    a.executeMove(0, 'YZ', -1); await settled();
+    a.selectCentralCell(5);     await settled();
+    a.setViewMode('total-wire');
+    a.setControlSet('both');
+    document.getElementById('speed-slider').value = 8;
+    document.getElementById('speed-slider').dispatchEvent(new Event('input'));
+    a._scheduleSave.flush();                       // force the pending write out now
+    return {
+      cubies: JSON.stringify(a.cubies.map(c => Array.from(c.pos4))),
+      central: a.centralCellIndex,
+      viewMode: a.viewMode,
+      controlSet: a.controlSet,
+      speed: parseInt(document.getElementById('speed-slider').value),
+    };
+  });
+
+  await page.reload();
+  await page.waitForFunction(() => !!window.__app);
+  await page.waitForTimeout(200);
+
+  const after = await page.evaluate(() => {
+    const a = window.__app;
+    return {
+      cubies: JSON.stringify(a.cubies.map(c => Array.from(c.pos4))),
+      central: a.centralCellIndex,
+      viewMode: a.viewMode,
+      controlSet: a.controlSet,
+      speed: parseInt(document.getElementById('speed-slider').value),
+      speedFactor: a.anim.speedFactor,
+    };
+  });
+
+  expect(after.cubies).toBe(before.cubies);
+  expect(after.central).toBe(before.central);
+  expect(after.viewMode).toBe(before.viewMode);
+  expect(after.controlSet).toBe(before.controlSet);
+  expect(after.speed).toBe(before.speed);
+  expect(after.speedFactor).toBeCloseTo(before.speed / 5);
+  expect(errors).toEqual([]);
+});
+
 test('captures reference screenshots', async ({ page }) => {
   await gotoApp(page);
   await mkdir(SHOTS, { recursive: true });

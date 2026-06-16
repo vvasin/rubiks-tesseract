@@ -187,6 +187,38 @@ export function undoMove(cubies, moveDescriptor) {
   }
 }
 
+// Serialize only the MUTABLE per-cubie fields for persistence. solvedPos4 and stickers
+// are rebuilt deterministically by buildSolvedPuzzle (same nested x,y,z,w order), so the
+// blob just needs each cubie's current pos4, world face dirs, and 4D orientation.
+export function serializeCubies(cubies) {
+  return cubies.map(c => ({
+    p: Array.from(c.pos4),
+    f: c.faceDirs.map(fd => Array.from(fd)),
+    o: Array.from(c.orient),
+  }));
+}
+
+// Restore the mutable fields onto a freshly-built solved `cubies` array, in place. Returns
+// true on success; on ANY shape mismatch it touches nothing and returns false, so a stale
+// or corrupted blob can't half-apply (caller keeps the solved puzzle).
+export function restoreCubies(cubies, data) {
+  if (!Array.isArray(data) || data.length !== cubies.length) return false;
+  for (let i = 0; i < cubies.length; i++) {
+    const d = data[i], c = cubies[i];
+    if (!d || !Array.isArray(d.p) || d.p.length !== 4) return false;
+    if (!Array.isArray(d.o) || d.o.length !== 16) return false;
+    if (!Array.isArray(d.f) || d.f.length !== c.faceDirs.length) return false;
+    if (!d.f.every(fd => Array.isArray(fd) && fd.length === 4)) return false;
+  }
+  for (let i = 0; i < cubies.length; i++) {
+    const d = data[i], c = cubies[i];
+    c.pos4.set(d.p);
+    for (let si = 0; si < c.faceDirs.length; si++) c.faceDirs[si].set(d.f[si]);
+    c.orient = new Float64Array(d.o);
+  }
+  return true;
+}
+
 // Deep clone puzzle (for undo stack snapshots if needed)
 export function clonePuzzle(cubies) {
   return cubies.map(c => ({
