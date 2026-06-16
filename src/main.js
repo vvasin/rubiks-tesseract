@@ -8,6 +8,8 @@ import { AnimationEngine } from './animation.js';
 import { Controls, buildCellTiles, buildTurnControls, setCenteredTile, setControlSet } from './controls.js';
 
 const AXIS_LETTERS = ['X', 'Y', 'Z', 'W'];   // 4D axis index → plane-name letter
+const DEFAULT_YAW  = -Math.PI / 5.5;         // resting turntable yaw; also the reference the twist
+                                             // buttons orient against (their icons read right here)
 const MAIN_CAM     = 15;                      // camera distance at zoom 1 (main view default)
 const SUBVIEW_ZOOM = 2.4;                     // sub-views share the main camera distance and only
                                              // crop-zoom in to fill the tile (no distortion). Tuned
@@ -47,7 +49,7 @@ class App {
     this.controlSet = CONTROL_SETS.includes(saved?.controlSet) ? saved.controlSet : 'central';
 
     // Turntable view: independent yaw/pitch so horizontal drag never leaks into roll.
-    this.viewYaw   = -Math.PI / 5.5;
+    this.viewYaw   = DEFAULT_YAW;
     this.viewPitch =  Math.PI / 7;
     this.viewZoom  = 1.0;
     this.viewRot = this._composeViewRot();
@@ -182,7 +184,7 @@ class App {
   }
 
   resetView() {
-    this.viewYaw = -Math.PI / 5.5;
+    this.viewYaw = DEFAULT_YAW;
     this.viewPitch = Math.PI / 7;
     this.viewZoom = 1.0;
     this.viewRot = this._composeViewRot();
@@ -217,13 +219,33 @@ class App {
 
   // ── Turns (only the centred cell; mapped from a screen-plane button) ──────────
 
+  // The twist buttons name a move by SCREEN axes (e0→x, e1→y, e2→z). At rest those
+  // map to the centred cell's canonical frame, but the user can yaw the turntable —
+  // so a button's "front-left / front-right" face is no longer the canonical one. This
+  // returns the frame the buttons should resolve against: the canonical frame with its
+  // two HORIZONTAL axes (e0,e2) rotated by the view's nearest yaw quarter-turn (relative
+  // to DEFAULT_YAW), so e0 stays on whichever face currently sits in the front-left slot
+  // and e2 in the front-right slot. The vertical axis e1 (top) and depth eF are kept —
+  // top is deliberately static. It's a proper 90°-quantised rotation, so det stays +1 and
+  // every icon-arrow sign convention still holds; at the resting view (k=0) it's exactly
+  // the canonical frame. (Swipes don't use this — they read true on-screen geometry.)
+  _buttonFrame() {
+    const f = frameForCell(this.centralCellIndex);
+    let k = Math.round((DEFAULT_YAW - this.viewYaw) / (Math.PI / 2)) % 4;
+    if (k < 0) k += 4;
+    let e0 = f.e[0], e2 = f.e[2];
+    for (let i = 0; i < k; i++) { const t = e0; e0 = e2.map(v => -v); e2 = t; }   // (e0,e2) → (−e2, e0)
+    return { e: [e0, f.e[1], e2], eF: f.eF };
+  }
+
   // A twist button names a screen-plane via two indices into the core frame basis
   // (e0→x, e1→y, e2→z) and a direction. Resolve it to the centred cell's concrete
-  // (planeName, sign) using its canonical frame, so the on-screen spin matches the
-  // icon's arrow regardless of which cell is centred.
-  turnScreenPlane(iIdx, jIdx, dir) {
+  // (planeName, sign) using `frame` (the buttons pass `_buttonFrame()`; the swipe and
+  // anything else default to the canonical frame), so the on-screen spin matches the
+  // icon's arrow regardless of which cell is centred or how the view is turned.
+  turnScreenPlane(iIdx, jIdx, dir, frame = null) {
     if (this.anim.isBusy()) return;
-    const f = frameForCell(this.centralCellIndex);
+    const f = frame || frameForCell(this.centralCellIndex);
     const { planeName, sign } = this._screenPlaneMove(f, iIdx, jIdx, dir);
     this.executeMove(this.centralCellIndex, planeName, sign);
   }
@@ -232,9 +254,9 @@ class App {
   // the same move family the shuffle uses. `kScreen` is the face-normal screen axis
   // (0/1/2 ↔ e0/e1/e2), `sSide` ±1 which of the two faces. The turn plane is the other
   // two screen axes (so it avoids the depth axis — a clean Rubik's face turn).
-  turnFace(kScreen, sSide, dir) {
+  turnFace(kScreen, sSide, dir, frame = null) {
     if (this.anim.isBusy()) return;
-    const f = frameForCell(this.centralCellIndex);
+    const f = frame || frameForCell(this.centralCellIndex);
     const eN = f.e[kScreen];
     const fAxis = nonzeroAxis(eN);
     const ci = CELLS.findIndex(c => c.axis === fAxis && c.val === sSide * Math.sign(eN[fAxis]));
@@ -260,9 +282,9 @@ class App {
 
   // Turn the MIDDLE layer of the central cube along screen axis `kScreen` (a true
   // middle slice — only the centred cube's middle ring moves; see executeMiddleMove).
-  turnMiddle(kScreen, dir) {
+  turnMiddle(kScreen, dir, frame = null) {
     if (this.anim.isBusy() || this.anim.moveQueue.length >= 3) return;
-    const f = frameForCell(this.centralCellIndex);
+    const f = frame || frameForCell(this.centralCellIndex);
     const fAxis = nonzeroAxis(f.e[kScreen]);
     const [i, j] = [0, 1, 2].filter(x => x !== kScreen);
     const { planeName, sign } = this._screenPlaneMove(f, i, j, dir);

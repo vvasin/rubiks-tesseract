@@ -50,7 +50,7 @@ canvas uses `preserveDrawingBuffer`, so it can be read back via a 2D canvas in t
 ## Files
 
 - `index.html` / `style.css` — game shell: one full-area canvas, the 4-top/4-bottom cell tiles, the stage (menu button + the 4 twist-button groups), and the menu/confirm overlays. Mobile-first, `dvh` + safe-area insets; `#app` width = `min(100vw,100dvh)` (square-capped) so the main view grows on wide screens, with the cell strips capped/centered.
-- `src/main.js` — `App`: state, **9-view render loop** (`_loop`/`_render`, dirty-flag redraw), view (yaw/pitch/zoom), stable centering, screen-plane→move dispatch (`turnScreenPlane`), shuffle, menu/view-mode wiring, **session persistence** (`_serialize`/`_restoreSettingsUI` + a debounced `_scheduleSave`). Bootstraps `window.__app`.
+- `src/main.js` — `App`: state, **9-view render loop** (`_loop`/`_render`, dirty-flag redraw), view (yaw/pitch/zoom), stable centering, screen-plane→move dispatch (`turnScreenPlane`/`turnFace`/`turnMiddle`, against a view-following `_buttonFrame` for buttons), direct **swipe-to-turn** (`centralStickers`/`applyCentralSwipe`), shuffle, menu/view-mode wiring, **session persistence** (`_serialize`/`_restoreSettingsUI` + a debounced `_scheduleSave`). Bootstraps `window.__app`.
 - `src/math4d.js` — 4×4 / 3×3 matrix + 4D vector helpers (`mat4PlaneRotation`, `mat4MulVec4`, `PLANE_AXES`, …) **+ the SO(4) geodesic** (`so4Slerp`, `so4Decompose`, `mat4Det`, `mat4FromCols`) used by stable centering.
 - `src/puzzle.js` — cubie model, `CELLS` (the 8 cells + colors), `executeMove`/`undoMove`, the middle-slice (`executeMiddleMove`/`middleNetSign`), and persistence (de)serialization of the mutable cubie fields (`serializeCubies`/`restoreCubies`).
 - `src/projection.js` — **the heart**: 4D→3D projection, cubie geometry, color fade, wireframes, canonical frames + `slerpFrame`, and `computeCellCube` (one cell as a solid cube, for sub-views). Almost all design decisions live here.
@@ -186,11 +186,19 @@ behind it — no alpha blending, depth buffer untouched. Steady state needs no b
     - outer slabs (`turnFace(kScreen, sSide, dir)`) — turn the **side cell** on that face in
       the depth-avoiding plane = a normal Rubik's face turn (same family the shuffle uses).
     - middle slab (`turnMiddle(kScreen, dir)`) — see "Middle slice" below.
-  Every button is a STATIC icon: the canonical frame maps the centred cell's free axes to the
-  same screen x/y/z, so each maps (via `_screenPlaneMove`) to the centred cell's concrete
-  `(planeName, sign)`. `_screenPlaneMove` includes a permutation-parity factor so `dir=+1` is
-  always a right-handed CCW turn about the +screen axis (matching the icon arrow) — without it
-  the Y plane (0,2), being cyclically odd, comes out inverted.
+  Every button is a STATIC icon, but its **target follows the view**: the icons depict a cube
+  cornered edge-toward-you showing a front-left, front-right, and top face, and the buttons
+  resolve against `_buttonFrame()` — the canonical frame with its two **horizontal** axes
+  (`e0`,`e2`) rotated by the view's nearest yaw quarter-turn (relative to `DEFAULT_YAW`), so the
+  front-left / front-right slots always point at the faces actually in those positions. The
+  **top axis `e1` is deliberately left static** (so is `eF`). It's a proper 90°-quantised
+  rotation (det stays +1), so at the resting view it *is* the canonical frame (no change) and
+  every sign convention below still holds. (Only the buttons use `_buttonFrame`; swipes read
+  true on-screen geometry, so they're already view-correct and pass the canonical frame.)
+  `_screenPlaneMove` then maps the chosen screen-plane to the centred cell's concrete
+  `(planeName, sign)`; its permutation-parity factor makes `dir=+1` always a right-handed CCW
+  turn about the +screen axis (matching the icon arrow) — without it the Y plane (0,2), being
+  cyclically odd, comes out inverted.
 - **Swipe to turn** (`App.centralStickers` / `applyCentralSwipe`, driven by `controls.js`): the
   same layer turns are also reachable by **dragging across the centred cube** directly. Because
   a central-cell cubie always projects to a clean grid (`pos4·eF = 1` → `depthR(1)=1.35`

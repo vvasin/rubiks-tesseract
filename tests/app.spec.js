@@ -212,6 +212,46 @@ test('a swipe that exits the start sticker off the cube still turns (exit-direct
   expect(errors).toEqual([]);
 });
 
+test('twist buttons follow the view: button frame tracks screen slots across yaw', async ({ page }) => {
+  const errors = await gotoApp(page);
+  const r = await page.evaluate(async () => {
+    const a = window.__app;
+    const m3v = (m, v) => [m[0]*v[0]+m[3]*v[1]+m[6]*v[2], m[1]*v[0]+m[4]*v[1]+m[7]*v[2], m[2]*v[0]+m[5]*v[1]+m[8]*v[2]];
+    const dot4 = (p, q) => p[0]*q[0]+p[1]*q[1]+p[2]*q[2]+p[3]*q[3];
+    const DEF = a.viewYaw;                                    // app starts at DEFAULT_YAW
+    a.viewYaw = DEF; a.viewRot = a._composeViewRot();
+    const canon = a._buttonFrame();                          // k=0 → canonical frame
+    const vr0 = a.viewRot.slice();
+    const modelDir = v4 => [dot4(v4, canon.e[0]), dot4(v4, canon.e[1]), dot4(v4, canon.e[2])];
+    const slotAt = (frame, vr, k) => m3v(vr, modelDir(frame.e[k]));
+    const ref = [0, 1, 2].map(k => slotAt(canon, vr0, k));   // resting on-screen slot directions
+    const close = (p, q) => Math.max(Math.abs(p[0]-q[0]), Math.abs(p[1]-q[1]), Math.abs(p[2]-q[2])) < 1e-6;
+
+    // Each screen slot must keep projecting to the same on-screen direction as the view yaws,
+    // and the top axis (e1) must never move.
+    const slots = [];
+    for (const dq of [1, 2, 3, -1]) {
+      a.viewYaw = DEF + dq*Math.PI/2; a.viewRot = a._composeViewRot();
+      const bf = a._buttonFrame();
+      slots.push(JSON.stringify(bf.e[1]) === JSON.stringify(canon.e[1])
+        && [0, 1, 2].every(k => close(slotAt(bf, a.viewRot, k), ref[k])));
+    }
+
+    // Functional: the same "left" button acts on a different cell once the view is yawed 90°.
+    const settled = () => new Promise(res => { const t = setInterval(() => { if (a.anim.isIdle() && !a.pendingCenter) { clearInterval(t); res(); } }, 20); });
+    a.anim.speedFactor = 6;
+    a.viewYaw = DEF; a.viewRot = a._composeViewRot();
+    a.turnFace(0, +1, +1, a._buttonFrame()); await settled(); const restCell = a.undoStack.at(-1).cellIndex; a.undo(); await settled();
+    a.viewYaw = DEF + Math.PI/2; a.viewRot = a._composeViewRot();
+    a.turnFace(0, +1, +1, a._buttonFrame()); await settled(); const yawCell = a.undoStack.at(-1).cellIndex;
+    a.viewYaw = DEF; a.viewRot = a._composeViewRot();
+    return { slots, restCell, yawCell };
+  });
+  expect(r.slots).toEqual([true, true, true, true]);   // all quadrants track, top static
+  expect(r.yawCell).not.toBe(r.restCell);              // button followed the view
+  expect(errors).toEqual([]);
+});
+
 test('captures reference screenshots', async ({ page }) => {
   await gotoApp(page);
   await mkdir(SHOTS, { recursive: true });

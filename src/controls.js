@@ -171,10 +171,12 @@ export function setCenteredTile(idx) {
 }
 
 // One layer-turn button for axis k: outer slabs → turnFace, middle slab → turnMiddle.
+// Each fires against `app._buttonFrame()` (computed at click time) so the move follows the
+// face currently in that screen slot as the view is yawed — see App._buttonFrame.
 function slabBtn(app, k, slab, dir) {
-  if (slab === 'mid') return { html: middleIcon(k, dir), fn: () => app.turnMiddle(k, dir) };
+  if (slab === 'mid') return { html: middleIcon(k, dir), fn: () => app.turnMiddle(k, dir, app._buttonFrame()) };
   const s = slab === 'top' ? +1 : -1;
-  return { html: faceIcon(k, s, dir), fn: () => app.turnFace(k, s, dir) };
+  return { html: faceIcon(k, s, dir), fn: () => app.turnFace(k, s, dir, app._buttonFrame()) };
 }
 
 // The 6 layer-turn buttons (3 slabs × 2 dirs) for one axis, ordered for the grid:
@@ -204,7 +206,7 @@ function fillGroup(id, set, cls, buttons) {
 // top/left/right = per-axis layer turns (top/middle/bottom slab × 2 dirs).
 export function buildTurnControls(app) {
   fillGroup('turn-bottom', 'central', 'grid-3col',
-    TURN_BUTTONS.map(b => ({ html: turnIcon(b.key, b.dir), fn: () => app.turnScreenPlane(b.iIdx, b.jIdx, b.dir) })));
+    TURN_BUTTONS.map(b => ({ html: turnIcon(b.key, b.dir), fn: () => app.turnScreenPlane(b.iIdx, b.jIdx, b.dir, app._buttonFrame()) })));
   fillGroup('turn-top',   'sides', 'grid-3col', slabButtons(app, 1, 'h'));  // screen Y axis
   fillGroup('turn-left',  'sides', 'grid-2col', slabButtons(app, 0, 'v'));  // screen X axis
   fillGroup('turn-right', 'sides', 'grid-2col', slabButtons(app, 2, 'v'));  // screen Z axis
