@@ -41,7 +41,7 @@ a.applyCentralSwipe(start, x, y);   // turn the layer a swipe from sticker `star
 a.selectCentralCell(4);             // animated, stable recentering
 a.shuffle();                        // one-shot scramble (SHUFFLE_TURNS moves, full speed)
 a.setCentralMode('wire');           // focused layer: 'solid' | 'wire'
-a.setSideMode('none');              // side cells: 'wire' | 'none'
+a.setSideMode('none');              // side cells: 'semi' | 'wire' | 'none'
 a.setCoreWire(true);               // core-tesseract wireframe overlay on/off
 a.coreFrame;                        // current 4D frame {e:[e0,e1,e2], eF} — at rest, a canonical frame
 ```
@@ -60,7 +60,7 @@ canvas uses `preserveDrawingBuffer`, so it can be read back via a 2D canvas in t
 - `src/animation.js` — `AnimationEngine`: move / middle-slice / centering queue, easing, per-frame state (per-cubie net sign for slices). `MOVE_DURATION=360ms`, `TRANSITION_DURATION=620ms`, `speedFactor`.
 - `src/controls.js` — unified pointer input: a drag that starts on a centred-cube sticker is a **layer swipe** (resolved via `App.centralStickers`/`applyCentralSwipe`) and never orbits; a drag that starts on the background or a cell tile orbits all views; tap a tile to centre that cell; pinch zoom. Plus keyboard; builds the cell tiles (`buildCellTiles`) and the 4 twist-button groups around the cube (`buildTurnControls`), shown/hidden by `setControlSet`.
 - `src/icons.js` — twist-button SVG icons, reconstructed in code from 4 hand-crafted base glyphs (full-cube / top / middle / bottom slab — a CCW rotation about the vertical axis) and derived by transform: opposite direction = mirror, other axis = rotate 120°/240° (the iso cube is 3-fold symmetric). Vertical axis = screen-Y. `turnIcon`/`TURN_BUTTONS` (cube rotation, `full`), `faceIcon` (outer `top`/`bottom` slab), `middleIcon` (middle slab). Arrow uses the accent colour; the cube uses `currentColor`.
-- `src/shaders.js` — GLSL. Two-sided lambert (`abs(dot(n,light))`), `u_ambient=0.42`; screen-door (hashed) dither `discard` — keeps each fragment with probability `a_opacity`, for the solid→wireframe dissolve.
+- `src/shaders.js` — GLSL. Two-sided lambert (`abs(dot(n,light))`), `u_ambient=0.42`; screen-door dither `discard` via an **ordered Bayer 8×8** threshold (uniform frosted stipple, not noise) — keeps each fragment with probability `a_opacity`, for the solid→wireframe dissolve and the translucent semitransparent side cells.
 - `src/persistence.js` — `localStorage` read/write (best-effort: any storage/parse failure is swallowed) + a `debounce(fn, ms)` helper with `.flush()`. See "Persistence" below.
 - `scripts/serve.js` — zero-dep static dev server (sets ESM MIME types). `tests/` — Playwright specs. `playwright.config.js`, `eslint.config.js`, `package.json` — infra.
 
@@ -152,14 +152,20 @@ the focused-layer weight `solidWeight = smoothstep(0.4, 0.9, pos4·eF)` (1 = cen
 layer (a turn whose plane includes the central axis):
 
 - **Central cell** = `solid` (default) or `wire` — how the `sw≈1` cubies draw.
-- **Side cells** = `wire` (default) or `none` — how the `sw≈0` cubies draw (`none` hides them).
+- **Side cells** = `semi` (default) / `wire` / `none` — how the `sw≈0` cubies draw. `semi` draws them
+  as **translucent solids** (the whole tesseract reads as nested frosted cubes); `wire` as edges;
+  `none` hides them.
 - **Core tesseract** wireframe = on/off — the separate `computeCoreWireframe` overlay (default off).
 
-The defaults (solid centre, wireframe sides, no core) are the old "Solid" look: the focused
-3×3×3 reads as a clean Rubik's cube while the rest is see-through structure, not a wall of cubes.
-`computeCells` skips `sw≤0.02` cubies and tags faces with `opacity=sw`; `computeWireframe` takes
-options — `skipSolid` drops the cubies the solid centre fully covers (`sw≥0.98`), and `fade`
-sets `opacity=sw` so a *wireframe* cubie can dissolve out too.
+The default (solid centre, semitransparent sides, no core) shows the focused 3×3×3 as a clean
+opaque Rubik's cube with the rest of the tesseract as see-through frosted cubes around it (`wire`
+sides is the older shell look). `computeCells` takes `{sideAlpha, centralSolid}`: with `sideAlpha=0`
+(default) only the focused layer is solid (`opacity=sw`, skips `sw≤0.02`); with `sideAlpha>0` and a
+solid centre the sides are floored translucent (`opacity=max(sw, sideAlpha)`, `SIDE_ALPHA=0.4`); with
+`sideAlpha>0` and a wire centre the solid is the side role only (`opacity=sideAlpha·(1−sw)`), fading
+out as a cubie reaches the focused layer. `computeWireframe` options — `skipSolid` drops the cubies
+the solid centre fully covers (`sw≥0.98`), `fade` sets `opacity=sw` so a *wireframe* cubie can
+dissolve out too.
 
 Every **central→side hand-off is carried by the screen-door dither** (the shader keeps each
 fragment — face *or* line — with probability `opacity`, no alpha blending, depth buffer
@@ -167,8 +173,10 @@ untouched):
 
 | central → side | how it transitions |
 |---|---|
+| solid → semi | solid faces dither down to a translucent floor (`sw`→`SIDE_ALPHA`) — never vanish *(default)* |
 | solid → wire | solid faces dither out over a full-opacity side wireframe *(the classic shell)* |
 | solid → none | solid faces dither out **into nothing** |
+| wire → semi | side solids dither out as the central wireframe fades in |
 | wire → wire | edges stay at full opacity throughout — **no** transition |
 | wire → none | edges dither out **into nothing** (`fade`) |
 
@@ -254,7 +262,7 @@ or absent).
   recentering between rounds, run at full speed regardless of the speed slider.
 - **Menu**: Shuffle · Reset (confirm) · Settings (animation speed; Controls = Cube rotation
   (default) / Layer turns / Both / None; Central cell = Solid (default) / Wireframe; Side cells
-  = Wireframe (default) / None; Core tesseract wireframe checkbox (default off)).
+  = Semitransparent (default) / Wireframe / None; Core tesseract wireframe checkbox (default off)).
 - **Keys** (desktop convenience): `1–8` centre cell · arrows rotate view · `R` reset puzzle
   · `V` reset view · `W` toggle Central cell solid↔wireframe · `U`/`Shift+U` undo/redo. Pointer drag on the
   centred cube swipes a layer (above); drag on the background/tiles orbits; tap a sub-view

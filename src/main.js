@@ -21,7 +21,10 @@ const SAVE_DEBOUNCE = 500;                     // ms to coalesce persistence wri
 // solid or as wireframe; the side cells draw as wireframe or not at all; the core-tesseract
 // wireframe is a separate overlay. (The old single shell-wire/total-wire mode is migrated.)
 const CENTRAL_MODES = ['solid', 'wire'];
-const SIDE_MODES    = ['wire', 'none'];
+const SIDE_MODES    = ['semi', 'wire', 'none'];
+const SIDE_ALPHA    = 0.4;                     // opacity floor for the 'semi' side cells —
+                                              // carried order-independently by the shader's
+                                              // ordered (Bayer) screen-door dither
 const CONTROL_SETS  = ['central', 'sides', 'both', 'none'];   // 'none' = zen mode (no buttons)
 
 // Direct-manipulation swipe (turn the centred cube by dragging across its stickers).
@@ -54,7 +57,7 @@ class App {
     // to the all-wireframe-plus-core equivalent.
     const legacyTotal = saved?.centralMode == null && saved?.viewMode === 'total-wire';
     this.centralMode = CENTRAL_MODES.includes(saved?.centralMode) ? saved.centralMode : (legacyTotal ? 'wire' : 'solid');
-    this.sideMode    = SIDE_MODES.includes(saved?.sideMode) ? saved.sideMode : 'wire';
+    this.sideMode    = SIDE_MODES.includes(saved?.sideMode) ? saved.sideMode : (legacyTotal ? 'wire' : 'semi');
     this.coreWire    = typeof saved?.coreWire === 'boolean' ? saved.coreWire : legacyTotal;
     this.controlSet = CONTROL_SETS.includes(saved?.controlSet) ? saved.controlSet : 'central';
 
@@ -136,19 +139,32 @@ class App {
     const getState = frame && frame.type === 'move' ? frame.getState : null;
 
     // Main view geometry, from the three presentation settings. The focused (central)
-    // layer is solid faces or wireframe edges; the side cells are wireframe edges or
-    // nothing; the dither carries every central→side hand-off (see computeWireframe):
-    //   solid centre        → side wire : solid fades out over a full side wireframe
-    //   solid centre        → side none : solid fades out into nothing
-    //   wireframe centre     → side wire : edges at full opacity throughout — no transition
-    //   wireframe centre     → side none : edges fade out into nothing
+    // layer is solid faces or wireframe edges; the side cells are translucent solids,
+    // wireframe edges, or nothing; the dither carries every central→side hand-off:
+    //   solid centre     → side semi : side cells are translucent solids (max(sw, α))
+    //   solid centre     → side wire : solid fades out over a full side wireframe
+    //   solid centre     → side none : solid fades out into nothing
+    //   wireframe centre → side semi : side solids fade out as the wireframe fades in
+    //   wireframe centre → side wire : edges at full opacity throughout — no transition
+    //   wireframe centre → side none : edges fade out into nothing
     const centralWire = this.centralMode === 'wire';
     const sideWire = this.sideMode === 'wire';
-    const cells = centralWire ? [] : computeCells(this.cubies, coreFrame, getState);
+    const sideSemi = this.sideMode === 'semi';
+    let cells = [];
     let segments = [];
-    if (centralWire && sideWire) segments = computeWireframe(this.cubies, coreFrame, getState);
-    else if (centralWire)        segments = computeWireframe(this.cubies, coreFrame, getState, { fade: true });
-    else if (sideWire)           segments = computeWireframe(this.cubies, coreFrame, getState, { skipSolid: true });
+    if (sideSemi) {
+      // Translucent side cells, order-independent via the screen-door dither (no sorting,
+      // and the stipple absorbs the central↔side collision z-fighting). The centre stays
+      // a clean opaque solid, or — if set to wireframe — the side solids fade out as a
+      // cubie reaches the focused layer while its wireframe fades in.
+      cells = computeCells(this.cubies, coreFrame, getState, { sideAlpha: SIDE_ALPHA, centralSolid: !centralWire });
+      if (centralWire) segments = computeWireframe(this.cubies, coreFrame, getState, { fade: true });
+    } else {
+      cells = centralWire ? [] : computeCells(this.cubies, coreFrame, getState);
+      if (centralWire && sideWire) segments = computeWireframe(this.cubies, coreFrame, getState);
+      else if (centralWire)        segments = computeWireframe(this.cubies, coreFrame, getState, { fade: true });
+      else if (sideWire)           segments = computeWireframe(this.cubies, coreFrame, getState, { skipSolid: true });
+    }
     if (this.coreWire) {
       const spinCell = frame && frame.type === 'move' ? frame.cellIndex : -1;
       const spinR    = frame && frame.type === 'move' ? frame.R : null;

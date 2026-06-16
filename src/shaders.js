@@ -34,17 +34,19 @@ varying vec3 v_normal;
 uniform vec3 u_lightDir;
 uniform float u_ambient;
 
-// Stable per-pixel hash for screen-door (dither) transparency.
-float hash12(vec2 p) {
-  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
-  p3 += dot(p3, p3.yzx + 33.33);
-  return fract((p3.x + p3.y) * p3.z);
-}
+// Ordered Bayer (8×8) threshold for screen-door (dither) transparency. An ordered
+// matrix gives a uniform frosted stipple — which reads as natural semitransparency for
+// the translucent side cells — instead of the grainy TV-static of a per-pixel hash.
+// Recursive 2→4→8 construction (no array indexing; WebGL-1 friendly), output in [0,1).
+float bayer2(vec2 a) { a = floor(a); return fract(a.x * 0.5 + a.y * a.y * 0.75); }
+float bayer4(vec2 a) { return bayer2(a * 0.5) * 0.25 + bayer2(a); }
+float bayer8(vec2 a) { return bayer4(a * 0.5) * 0.25 + bayer2(a); }
 
 void main() {
-  // Screen-door dissolve: keep each fragment with probability v_opacity, so a cubie
-  // fading from solid to wireframe sprouts holes that reveal the wireframe behind it.
-  if (v_opacity < 0.999 && hash12(floor(gl_FragCoord.xy)) >= v_opacity) discard;
+  // Screen-door transparency — order-independent (writes depth, no blending/sorting):
+  // keep each fragment when its ordered-dither threshold is below v_opacity. A cubie
+  // fading solid→wireframe sprouts holes; a translucent side cell shows a steady stipple.
+  if (v_opacity < 0.999 && bayer8(gl_FragCoord.xy) >= v_opacity) discard;
   vec3 n = normalize(v_normal);
   // two-sided lighting so inner cell faces (revealed by morphing) still shade
   float diff = max(abs(dot(n, normalize(u_lightDir))), 0.0);

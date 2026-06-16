@@ -193,6 +193,30 @@ front sorting and leaves the opaque depth pipeline untouched — the alpha route
 re-introduced the sorting/blending fragility we spent §1–§7 avoiding. The dither pattern
 is screen-space and stable per pixel, so a cubie dissolves cleanly rather than sparkling.
 
+### Semitransparent side cells (the default) — same dither, lower floor
+
+The `none` (hide sides) and `wire` (edges only) side modes left a gap: a *translucent*
+look where the whole tesseract reads as nested frosted cubes. The naive version — render
+every cubie's 8 cell boxes with true alpha — is exactly the "translucent hell" of §5: with
+72 cubies × 8 nested cells × 6 faces there is no correct back-to-front order (the inner and
+outer cells of one cubie interpenetrate), and near-coplanar cubies colliding during a
+central↔side transition z-fight. **Weighted-blended OIT** would solve the ordering and
+(with depth writes off) kill the z-fight, but it needs MRT + half-float targets — risky on
+mobile WebGL 1 and a lot of framebuffer machinery for a no-build project.
+
+So `semi` reuses the **same screen-door dither**, just with a floor: side cubies draw as
+solids at `opacity = max(sw, SIDE_ALPHA)` (`SIDE_ALPHA=0.4`) instead of being dropped. It's
+order-independent for free (writes depth, no blend), and the stochastic discard turns the
+transition z-fight into a stipple rather than a shimmering plane — it *mitigates* the fight
+without eliminating it (depth is still written; true elimination would need OIT with depth
+writes off). To make 40% coverage read as **frosted glass instead of TV static**, the
+shader's per-pixel hash was replaced with an **ordered Bayer 8×8** threshold (recursive
+2→4→8, no array indexing — WebGL-1 friendly). The handoff stays continuous: a cubie leaving
+the focused layer fades `sw`→`SIDE_ALPHA` and never vanishes. (With a *wireframe* centre the
+side solid instead fades to nothing as the centre wireframe fades in: `opacity =
+SIDE_ALPHA·(1−sw)`.) If the stipple ever proves unacceptable, WBOIT is the documented
+upgrade path.
+
 ---
 
 ## 9. The game: 9 views + stable centering

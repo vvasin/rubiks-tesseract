@@ -229,19 +229,33 @@ function pushBoxFaces(faces, boxes, opacity) {
 }
 
 // Solid render: each cubie's cell boxes → outward (camera-facing) quad faces.
-export function computeCells(cubies, frame, getState = null) {
+//
+// Per-cubie opacity is set by the focused-layer weight `sw` (1 = central, 0 = side) and
+// the side policy:
+//   • sideAlpha = 0 (default): only the focused layer is solid (opacity = sw); side
+//     cubies fall below the cutoff and drop out — the classic solid-centre look.
+//   • sideAlpha > 0, centralSolid: side cells become translucent solids floored at
+//     sideAlpha (opacity = max(sw, sideAlpha)) — the semitransparent mode. The screen-
+//     door dither makes them see-through with no sorting (order-independent).
+//   • sideAlpha > 0, !centralSolid: the centre is drawn as wireframe elsewhere, so the
+//     solid is the side role only — it fades OUT as a cubie reaches the focused layer
+//     (opacity = sideAlpha·(1−sw)) while the wireframe fades in.
+export function computeCells(cubies, frame, getState = null, { sideAlpha = 0, centralSolid = true } = {}) {
   const faces = [];
   cubies.forEach((cubie, i) => {
     if (isHidden(cubie.pos4)) return;
     const st = getState ? getState(i) : null;
     const center4 = st ? st.center4 : cubie.pos4;
-    const sw = solidWeight(center4, frame);   // 0 = pure wireframe → skip the solid
-    if (sw <= 0.02) return;
+    const sw = solidWeight(center4, frame);   // 0 = pure side, 1 = focused layer
+    const opacity = sideAlpha <= 0 ? sw
+      : centralSolid ? Math.max(sw, sideAlpha)
+      : sideAlpha * (1 - sw);
+    if (opacity <= 0.02) return;
     // Pass the committed orientation as the target so each cell knows whether it's
     // heading toward the side role (revealing) or toward inner/outer (hiding).
     const { boxes } = cubieBoxes(
       cubie, center4, st ? st.orient : cubie.orient, frame, cubie.orient);
-    pushBoxFaces(faces, boxes, sw);
+    pushBoxFaces(faces, boxes, opacity);
   });
   return faces;
 }
