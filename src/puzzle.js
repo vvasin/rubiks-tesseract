@@ -1,5 +1,5 @@
 // Puzzle state: 81 cubies, cell definitions, move execution
-import { vec4, vec4Clone, applyPlaneRotation90, PLANE_AXES,
+import { applyPlaneRotation90, PLANE_AXES,
          mat4Identity, mat4Mul, mat4PlaneRotation } from './math4d.js';
 
 // Snap a 4×4 (signed-permutation after 90° turns) to clean integers.
@@ -133,6 +133,49 @@ export function executeMove(cubies, cellIndex, planeName, sign) {
   return { cellIndex, planeName, sign, snapshots };
 }
 
+// MIDDLE-SLICE: rotate the whole `fAxis = 0` hyper-slab of the tesseract — the central
+// cube's middle layer (9) PLUS the adjacent cells' middle slices lying in the same plane.
+// This is the slab between the two side cells ±f, so top-slab(+f) + middle + bottom-slab(−f),
+// all the same direction, exactly equal a whole-puzzle reorientation (solved stays solved).
+// The slab-axis cells ±f stay untouched (their cubies have pos4[fAxis]=±1). Like an M/E/S
+// slice it isn't a product of cell turns, but it IS one of the puzzle's moves (inverse too),
+// so every reachable state stays solvable. (`centralCellIndex` kept for the descriptor.)
+export function middleNetSign(cubie, centralCellIndex, fAxis) {
+  return cubie.pos4[fAxis] === 0 ? 1 : 0;
+}
+
+// Apply a middle-slice move (see middleNetSign). Returns a snapshot descriptor that
+// undoMove can restore, just like executeMove.
+export function executeMiddleMove(cubies, centralCellIndex, fAxis, planeName, sign) {
+  const [a, b] = PLANE_AXES[planeName];
+  const affected = [];
+  cubies.forEach((c, i) => { const ns = middleNetSign(c, centralCellIndex, fAxis); if (ns !== 0) affected.push({ i, ns }); });
+
+  const snapshots = affected.map(({ i, ns }) => ({
+    i, ns,
+    oldPos: new Int8Array(cubies[i].pos4),
+    oldFaceDirs: cubies[i].faceDirs.map(fd => new Int8Array(fd)),
+    oldOrient: new Float64Array(cubies[i].orient),
+  }));
+
+  for (const { i, ns } of affected) {
+    const c = cubies[i];
+    const s = ns * sign;                                  // this cubie's net ±90°
+    const newPos = applyPlaneRotation90(c.pos4, a, b, s);
+    c.pos4[0] = Math.round(newPos[0]); c.pos4[1] = Math.round(newPos[1]);
+    c.pos4[2] = Math.round(newPos[2]); c.pos4[3] = Math.round(newPos[3]);
+    for (let si = 0; si < c.faceDirs.length; si++) {
+      const fd = c.faceDirs[si];
+      const nfd = applyPlaneRotation90(fd, a, b, s);
+      fd[0] = Math.round(nfd[0]); fd[1] = Math.round(nfd[1]);
+      fd[2] = Math.round(nfd[2]); fd[3] = Math.round(nfd[3]);
+    }
+    c.orient = snapMat4(mat4Mul(mat4PlaneRotation(a, b, s * Math.PI / 2), c.orient));
+  }
+
+  return { type: 'middle', centralCellIndex, fAxis, planeName, sign, snapshots };
+}
+
 // Undo a move by restoring snapshots
 export function undoMove(cubies, moveDescriptor) {
   for (const { i, oldPos, oldFaceDirs, oldOrient } of moveDescriptor.snapshots) {
@@ -142,20 +185,6 @@ export function undoMove(cubies, moveDescriptor) {
     }
     cubies[i].orient = new Float64Array(oldOrient);
   }
-}
-
-// The 48 demo moves in canonical order
-export function buildDemoSequence() {
-  const moves = [];
-  for (const cell of CELLS) {
-    const cellIndex = CELLS.indexOf(cell);
-    const planes = getCellPlanes(cellIndex);
-    for (const plane of planes) {
-      moves.push({ cellIndex, planeName: plane, sign: +1 });
-      moves.push({ cellIndex, planeName: plane, sign: -1 });
-    }
-  }
-  return moves; // 48 moves
 }
 
 // Deep clone puzzle (for undo stack snapshots if needed)

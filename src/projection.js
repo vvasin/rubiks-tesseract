@@ -10,7 +10,7 @@
 // coloured by whichever sticker currently points along that free axis.
 
 import { CELLS } from './puzzle.js';
-import { mat4MulVec4 } from './math4d.js';
+import { mat4MulVec4, mat4FromCols, mat4Transpose, mat4Mul, mat4Det, so4Slerp } from './math4d.js';
 
 // Cubies are drawn as their OWN little Schlegel tesseract (same projection style as
 // the core): inner cell → small central cube, outer cell → big enclosing cube,
@@ -88,37 +88,43 @@ function sub3(a, b) { return [a[0]-b[0], a[1]-b[1], a[2]-b[2]]; }
 function cross3(a, b) { return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]; }
 function norm3(v) { const l = Math.hypot(v[0],v[1],v[2]) || 1; return [v[0]/l, v[1]/l, v[2]/l]; }
 
-// Rotate a 4D vector in the (a,b) plane by `angle`.
-function rotVec4(v, a, b, angle) {
-  const c = Math.cos(angle), s = Math.sin(angle);
-  const r = [v[0], v[1], v[2], v[3]];
-  r[a] = v[a]*c - v[b]*s;
-  r[b] = v[a]*s + v[b]*c;
-  return r;
-}
-
 // ── Core frame ────────────────────────────────────────────────────────────────
 
-// Axis-aligned frame that makes `cellIndex` central.
+// Canonical, axis-aligned frame that makes `cellIndex` central. It is forced to be
+// right-handed (det +1) so that every cell→cell centering is a PROPER 4D rotation
+// with a clean geodesic, and so revisiting a cell always lands on the same
+// orientation (the stable-centering guarantee). Swap the last two free axes when the
+// naive frame is left-handed.
 export function frameForCell(cellIndex) {
   const ax = CELLS[cellIndex].axis, val = CELLS[cellIndex].val;
   const free = [0,1,2,3].filter(a => a !== ax);
+  let e = [unit4(free[0], 1), unit4(free[1], 1), unit4(free[2], 1)];
+  if (mat4Det(mat4FromCols(e[0], e[1], e[2], unit4(ax, val))) < 0) {
+    e = [e[0], e[2], e[1]];
+  }
+  return { e, eF: unit4(ax, val) };
+}
+
+// Frame ↔ column-major 4×4 (columns = e0,e1,e2,eF).
+function frameToMat(f) { return mat4FromCols(f.e[0], f.e[1], f.e[2], f.eF); }
+function matToFrame(M) {
   return {
-    e:  [unit4(free[0], 1), unit4(free[1], 1), unit4(free[2], 1)],
-    eF: unit4(ax, val),
+    e: [[M[0],M[1],M[2],M[3]], [M[4],M[5],M[6],M[7]], [M[8],M[9],M[10],M[11]]],
+    eF: [M[12],M[13],M[14],M[15]],
   };
+}
+
+// Geodesic interpolation of the core frame from `fromFrame` to `toFrame` by t∈[0,1].
+// Both are signed-permutation frames; the SO(4) geodesic is smooth at every angle
+// (including the 180° opposite-cell case) and lands EXACTLY on toFrame at t=1.
+export function slerpFrame(fromFrame, toFrame, t) {
+  const Mf = frameToMat(fromFrame), Mt = frameToMat(toFrame);
+  const Rt = so4Slerp(mat4Mul(Mt, mat4Transpose(Mf)), t);   // world rotation from→to, eased by t
+  return matToFrame(mat4Mul(Rt, Mf));
 }
 
 export function cloneFrame(f) {
   return { e: f.e.map(v => v.slice()), eF: f.eF.slice() };
-}
-
-// Rotate the whole frame in the (a,b) 4D plane by `angle`.
-export function rotateFrame(f, a, b, angle) {
-  return {
-    e:  f.e.map(v => rotVec4(v, a, b, angle)),
-    eF: rotVec4(f.eF, a, b, angle),
-  };
 }
 
 // Which cell is central for a (rest) frame: the axis eF points along.
@@ -127,21 +133,6 @@ export function centralFromFrame(f) {
   for (let k = 0; k < 4; k++) if (Math.abs(f.eF[k]) > Math.abs(best)) { best = f.eF[k]; ax = k; }
   const val = best > 0 ? 1 : -1;
   return CELLS.findIndex(c => c.axis === ax && c.val === val);
-}
-
-// A 4D rotation (plane + total angle) that sweeps the frame from its current
-// central cell to `toCi`. Adjacent cells → a 90° turn in their shared plane;
-// the opposite cell → 180° through a free axis.
-export function centeringPlan(frame, toCi) {
-  const fromCi = centralFromFrame(frame);
-  const axA = CELLS[fromCi].axis, valA = CELLS[fromCi].val;
-  const axB = CELLS[toCi].axis,   valB = CELLS[toCi].val;
-  if (axA !== axB) {
-    return { a: axA, b: axB, angle: (valA * valB) * Math.PI / 2 };
-  }
-  // opposite cell: flip eF 180° through the first free axis
-  const other = [0,1,2,3].find(a => a !== axA);
-  return { a: axA, b: other, angle: Math.PI };
 }
 
 // ── Projection ────────────────────────────────────────────────────────────────
@@ -214,6 +205,29 @@ function cubieBoxes(cubie, center, orient, frame, targetOrient = orient) {
   return { cubieC, boxes };
 }
 
+// Emit the (camera-facing) quad faces of a cubie's 8 cell boxes into `faces`, at the
+// given opacity. Colour each box by its sticker via colorWeight (DARK when unused/
+// hidden). Normals point outward from each cell's own centroid so cells self-cull.
+function pushBoxFaces(faces, boxes, opacity) {
+  for (const bx of boxes) {
+    const C8 = bx.C8, ctr = bx.ctr;
+    const w = bx.color ? colorWeight(bx.df, bx.dft) : 0;
+    const color = w <= 0 ? DARK
+      : w >= 1 ? bx.color
+      : [DARK[0]+(bx.color[0]-DARK[0])*w, DARK[1]+(bx.color[1]-DARK[1])*w, DARK[2]+(bx.color[2]-DARK[2])*w];
+    for (let fi = 0; fi < BOX_FACES.length; fi++) {
+      const F = BOX_FACES[fi];
+      const q = [C8[F[0]], C8[F[1]], C8[F[2]], C8[F[3]]];
+      const fcx=(q[0][0]+q[1][0]+q[2][0]+q[3][0])*0.25 - ctr[0];
+      const fcy=(q[0][1]+q[1][1]+q[2][1]+q[3][1])*0.25 - ctr[1];
+      const fcz=(q[0][2]+q[1][2]+q[2][2]+q[3][2])*0.25 - ctr[2];
+      let n = norm3(cross3(sub3(q[1],q[0]), sub3(q[2],q[0])));
+      if (n[0]*fcx + n[1]*fcy + n[2]*fcz < 0) n = [-n[0],-n[1],-n[2]];
+      faces.push({ color, quad: q, normal: n, opacity, sortDepth: 0 });
+    }
+  }
+}
+
 // Solid render: each cubie's cell boxes → outward (camera-facing) quad faces.
 export function computeCells(cubies, frame, getState = null) {
   const faces = [];
@@ -227,26 +241,28 @@ export function computeCells(cubies, frame, getState = null) {
     // heading toward the side role (revealing) or toward inner/outer (hiding).
     const { boxes } = cubieBoxes(
       cubie, center4, st ? st.orient : cubie.orient, frame, cubie.orient);
-    for (const bx of boxes) {
-      const C8 = bx.C8, ctr = bx.ctr;
-      const w = bx.color ? colorWeight(bx.df, bx.dft) : 0;
-      const color = w <= 0 ? DARK
-        : w >= 1 ? bx.color
-        : [DARK[0]+(bx.color[0]-DARK[0])*w, DARK[1]+(bx.color[1]-DARK[1])*w, DARK[2]+(bx.color[2]-DARK[2])*w];
-      for (let fi = 0; fi < BOX_FACES.length; fi++) {
-        const F = BOX_FACES[fi];
-        const q = [C8[F[0]], C8[F[1]], C8[F[2]], C8[F[3]]];
-        // Orient the normal outward from the CELL's own centroid, so each cell
-        // back-face-culls on its own (frustums show their big face; the inside-out
-        // outer cell shows only far faces, which the depth test then hides).
-        const fcx=(q[0][0]+q[1][0]+q[2][0]+q[3][0])*0.25 - ctr[0];
-        const fcy=(q[0][1]+q[1][1]+q[2][1]+q[3][1])*0.25 - ctr[1];
-        const fcz=(q[0][2]+q[1][2]+q[2][2]+q[3][2])*0.25 - ctr[2];
-        let n = norm3(cross3(sub3(q[1],q[0]), sub3(q[2],q[0])));
-        if (n[0]*fcx + n[1]*fcy + n[2]*fcz < 0) n = [-n[0],-n[1],-n[2]];
-        faces.push({ color, quad: q, normal: n, opacity: sw, sortDepth: 0 });
-      }
-    }
+    pushBoxFaces(faces, boxes, sw);
+  });
+  return faces;
+}
+
+// Sub-view render: ONE cell drawn as a clean, fully-solid 3×3×3 Rubik's cube. Only
+// that cell's cubies are emitted (the other 7 cells hidden); with `frame` =
+// frameForCell(cellIndex) the cell's own axis is depth, so its side stickers form the
+// 6 cube faces and the along-axis (inner/outer) mini-cells read dark — the same look
+// the centred cell has in the main view, isolated. During a neighbouring cell's turn,
+// cubies that slide in/out of this cell are kept while they're on this cell's 4D side.
+export function computeCellCube(cubies, cellIndex, frame, getState = null) {
+  const { axis, val } = CELLS[cellIndex];
+  const faces = [];
+  cubies.forEach((cubie, i) => {
+    if (isHidden(cubie.pos4)) return;
+    const st = getState ? getState(i) : null;
+    const center4 = st ? st.center4 : cubie.pos4;
+    if (center4[axis] * val <= 0.5) return;   // only cubies on this cell's side
+    const { boxes } = cubieBoxes(
+      cubie, center4, st ? st.orient : cubie.orient, frame, cubie.orient);
+    pushBoxFaces(faces, boxes, 1);            // sub-view cells are always solid
   });
   return faces;
 }

@@ -1,29 +1,34 @@
 import { mat3Mul, mat3AxisRotation } from './math4d.js';
 import { buildSolvedPuzzle, undoMove, CELLS } from './puzzle.js';
-import { computeCells, computeWireframe, computeCoreWireframe, frameForCell, cloneFrame, rotateFrame,
-         centeringPlan, centralFromFrame } from './projection.js';
+import { computeCells, computeCellCube, computeWireframe, computeCoreWireframe,
+         frameForCell, cloneFrame, slerpFrame, centralFromFrame } from './projection.js';
 import { Renderer } from './renderer.js';
 import { AnimationEngine } from './animation.js';
-import { Controls, buildCellPanel, updateCentralBadge } from './controls.js';
-import { DemoMode } from './demo.js';
+import { Controls, buildCellTiles, buildTurnControls, setCenteredTile, setControlSet } from './controls.js';
 
 const AXIS_LETTERS = ['X', 'Y', 'Z', 'W'];   // 4D axis index → plane-name letter
+const MAIN_CAM     = 15;                      // camera distance at zoom 1 (main view default)
+const SUBVIEW_ZOOM = 2.4;                     // sub-views share the main camera distance and only
+                                             // crop-zoom in to fill the tile (no distortion). Tuned
+                                             // for zoom 1; sub-cubes scale with the main zoom.
+const SHUFFLE_TURNS = 20;                      // moves per Shuffle
+const SHUFFLE_SPEED = 2.0;                     // Shuffle always runs at full speed
 
 class App {
   constructor() {
     this.cubies = buildSolvedPuzzle();
     this.centralCellIndex = 0;
-    this.coreFrame = frameForCell(0);     // explicit 4D core orientation
-    this.pendingCenter = null;            // active centering {fromFrame, plan, toCi}
-    this.showWire = false;                // wireframe toggle (cubies + core as wireframes)
-    // Turntable view: independent yaw (around world Y) and pitch (around screen X).
-    // Keeping them as separate angles — rather than accumulating free rotations —
-    // means horizontal drag never leaks into roll, so the puzzle stays upright.
-    this.viewYaw   = -Math.PI / 5.5;      // ~33° → shows the right faces
-    this.viewPitch =  Math.PI / 7;        // ~26° → shows the top faces
-    this.viewZoom  = 1.0;                 // camera-distance multiplier
+    this.coreFrame = frameForCell(0);          // explicit 4D core orientation
+    this.subFrames = CELLS.map((_, i) => frameForCell(i));   // fixed canonical frame per sub-view
+    this.pendingCenter = null;                 // active centering { fromFrame, toFrame, toCi }
+    this.viewMode = 'shell-wire';              // 'shell-wire' | 'total-wire' | 'semi'(disabled)
+    this.controlSet = 'sides';                 // 'central' | 'sides' | 'both'
+
+    // Turntable view: independent yaw/pitch so horizontal drag never leaks into roll.
+    this.viewYaw   = -Math.PI / 5.5;
+    this.viewPitch =  Math.PI / 7;
+    this.viewZoom  = 1.0;
     this.viewRot = this._composeViewRot();
-    this.mode = 'regular'; // 'regular' | 'demo'
 
     this.undoStack = [];
     this.redoStack = [];
@@ -32,149 +37,220 @@ class App {
     this.anim.onMoveComplete = (desc) => this._onMoveComplete(desc);
     this.anim.onCentralComplete = () => this._onCentralComplete();
 
-    this.demo = new DemoMode();
-    this.demoSpeedFactor = 1.0;
+    this.shuffling = false;
+    this.shuffleQueue = [];
 
-    this.scrambling = false;     // looping scramble on/off
-    this.scrambleQueue = [];     // pending actions for the current round
-    this.scrambleLastMove = null; // most recent scramble move (to avoid undoing it)
+    this.dirty = true;                         // redraw flag (render only when needed)
 
     this.canvas = document.getElementById('glcanvas');
     this.renderer = new Renderer(this.canvas);
+    this.stageEl = document.getElementById('stage');
+
+    buildCellTiles();
+    buildTurnControls(this);
+    setControlSet(this.controlSet);
+    this.tileEls = [];
+    document.querySelectorAll('.cell-tile').forEach(el => { this.tileEls[+el.dataset.cell] = el; });
+    setCenteredTile(this.centralCellIndex);
 
     this.controls = new Controls(this.canvas, this);
-    buildCellPanel(document.getElementById('cell-panel'), this);
-    updateCentralBadge(document.getElementById('cell-panel'), this.centralCellIndex);
-
     this._bindUI();
-    this._updateMoveCounter();
+
+    window.addEventListener('resize', () => this.markDirty());
+    window.addEventListener('orientationchange', () => this.markDirty());
+    // iOS Safari ignores user-scalable=no, so block its pinch gesture from zooming the
+    // page (we handle zoom on the canvas ourselves; double-tap zoom is off via touch-action).
+    for (const ev of ['gesturestart', 'gesturechange', 'gestureend']) {
+      document.addEventListener(ev, e => e.preventDefault(), { passive: false });
+    }
 
     requestAnimationFrame(ts => this._loop(ts));
   }
+
+  markDirty() { this.dirty = true; }
 
   // ── Render loop ──────────────────────────────────────────────────────────────
 
   _loop(timestamp) {
-    // Drive demo
-    if (this.mode === 'demo' && this.demo.playing) {
-      const move = this.demo.getNextMove(this.anim.isIdle());
-      if (move) {
-        this.anim.queueMove(this.cubies, move.cellIndex, move.planeName, move.sign);
-        this._updateMoveCounter(move.demoIndex + 1);
-      }
-    }
+    if (this.shuffling && this.anim.isIdle()) this._shuffleStep();
 
-    // Drive scramble: feed the next action whenever the engine is idle.
-    if (this.scrambling && this.anim.isIdle()) this._scrambleStep();
-
-    // Tick animation
     const frame = this.anim.tick(timestamp, this.cubies, this.centralCellIndex);
 
-    // Determine the core frame to project with this instant.
+    const busy = !this.anim.isIdle() || !!this.pendingCenter || this.shuffling;
+    if (this.dirty || busy) {
+      this._render(frame);
+      this.dirty = false;
+    }
+    requestAnimationFrame(ts => this._loop(ts));
+  }
+
+  _render(frame) {
+    // Core frame for this instant (interpolated during a centering animation).
     let coreFrame = this.coreFrame;
     if (frame && frame.type === 'central' && this.pendingCenter) {
-      const { fromFrame, plan } = this.pendingCenter;
-      coreFrame = rotateFrame(fromFrame, plan.a, plan.b, plan.angle * easeInOut(frame.t));
+      coreFrame = slerpFrame(this.pendingCenter.fromFrame, this.pendingCenter.toFrame, easeInOut(frame.t));
     }
-
     const getState = frame && frame.type === 'move' ? frame.getState : null;
 
-    // Wireframe mode replaces the solid cubies with cell wireframes + the core.
-    let cells, segments = null;
-    if (this.showWire) {
+    // Main view geometry.
+    let cells, segments;
+    if (this.viewMode === 'total-wire') {
       cells = [];
-      segments = computeWireframe(this.cubies, coreFrame, getState);
-      // All 8 core boxes are always shown; the turning cell spins with the move,
-      // and the whole set rotates with the interpolated frame during recentering.
       const spinCell = frame && frame.type === 'move' ? frame.cellIndex : -1;
       const spinR    = frame && frame.type === 'move' ? frame.R : null;
-      segments = segments.concat(
-        computeCoreWireframe(coreFrame, [0, 1, 2, 3, 4, 5, 6, 7], spinCell, spinR));
+      segments = computeWireframe(this.cubies, coreFrame, getState)
+        .concat(computeCoreWireframe(coreFrame, [0, 1, 2, 3, 4, 5, 6, 7], spinCell, spinR));
     } else {
-      // Normal mode: the central cell renders solid (dithered), the outer layers
-      // render as wireframe, with a screen-door dissolve across the handoff.
       cells = computeCells(this.cubies, coreFrame, getState);
       segments = computeWireframe(this.cubies, coreFrame, getState, true);
     }
 
-    this.renderer.draw(cells, this.viewRot, segments, 15 / this.viewZoom);
-    requestAnimationFrame(ts => this._loop(ts));
+    const r = this.renderer;
+    const canvasRect = this.canvas.getBoundingClientRect();
+    r.beginFrame();
+    const H = this.canvas.height, dpr = window.devicePixelRatio || 1;
+    const rectOf = el => this._glRect(el, canvasRect, dpr, H);
+
+    // Main tesseract view.
+    const camDist = MAIN_CAM / this.viewZoom;
+    r.drawView(cells, this.viewRot, segments, camDist, rectOf(this.stageEl));
+    // 8 cell sub-views — each cell as a solid Rubik's cube, sharing the same viewRot AND the
+    // same camera distance as the main view (so identical perspective), cropped to fill the tile.
+    for (let i = 0; i < 8; i++) {
+      const sub = computeCellCube(this.cubies, i, this.subFrames[i], getState);
+      r.drawView(sub, this.viewRot, null, camDist, rectOf(this.tileEls[i]), SUBVIEW_ZOOM);
+    }
   }
 
-  // ── App actions (called by controls) ────────────────────────────────────────
+  // DOM element → GL device-pixel rect (origin bottom-left), relative to the canvas.
+  _glRect(el, canvasRect, dpr, H) {
+    const b = el.getBoundingClientRect();
+    const w = Math.round(b.width * dpr), h = Math.round(b.height * dpr);
+    const x = Math.round((b.left - canvasRect.left) * dpr);
+    const y = H - Math.round((b.top - canvasRect.top) * dpr) - h;
+    return { x, y, w, h };
+  }
+
+  // ── View ─────────────────────────────────────────────────────────────────────
 
   _composeViewRot() {
     return mat3Mul(mat3AxisRotation(0, this.viewPitch), mat3AxisRotation(1, this.viewYaw));
   }
 
-  // Orbit the camera by yaw/pitch deltas (radians). Pitch is clamped just shy of
-  // the poles so the view can't flip over or gimbal-lock.
   orbit(dYaw, dPitch) {
-    const maxPitch = Math.PI / 2;   // allow a true straight-down / straight-up view
+    const maxPitch = Math.PI / 2;
     this.viewYaw += dYaw;
     this.viewPitch = Math.max(-maxPitch, Math.min(maxPitch, this.viewPitch + dPitch));
     this.viewRot = this._composeViewRot();
+    this.markDirty();
   }
 
   zoomBy(factor) {
     this.viewZoom = Math.max(0.5, Math.min(2.2, this.viewZoom * factor));
+    this.markDirty();
   }
 
   resetView() {
-    this.viewYaw   = -Math.PI / 5.5;
-    this.viewPitch =  Math.PI / 7;
-    this.viewZoom  = 1.0;
+    this.viewYaw = -Math.PI / 5.5;
+    this.viewPitch = Math.PI / 7;
+    this.viewZoom = 1.0;
     this.viewRot = this._composeViewRot();
+    this.markDirty();
   }
 
+  // ── Centering (stable: always commits the destination's canonical frame) ──────
+
   selectCentralCell(cellIndex) {
-    if (cellIndex === this.centralCellIndex) return;
-    if (this.anim.isBusy()) return;   // one reorientation at a time
-    // Real 4D centering: rotate the core frame from the current cell to this one.
+    if (this.anim.isBusy()) return;
+    if (cellIndex === this.centralCellIndex && !this.pendingCenter) return;
     this.pendingCenter = {
       fromFrame: cloneFrame(this.coreFrame),
-      plan: centeringPlan(this.coreFrame, cellIndex),
+      toFrame: frameForCell(cellIndex),
       toCi: cellIndex,
     };
     this.anim.queueCentralCell(this.centralCellIndex, cellIndex);
     this.centralCellIndex = cellIndex;
-    updateCentralBadge(document.getElementById('cell-panel'), cellIndex);
-    this._setStatus(`Central cell: ${CELLS[cellIndex].name}`);
+    setCenteredTile(cellIndex);
+    this.markDirty();
   }
 
   _onCentralComplete() {
     if (!this.pendingCenter) return;
-    const { fromFrame, plan } = this.pendingCenter;
-    this.coreFrame = rotateFrame(fromFrame, plan.a, plan.b, plan.angle);  // commit
+    this.coreFrame = this.pendingCenter.toFrame;     // commit the exact canonical frame
     this.centralCellIndex = centralFromFrame(this.coreFrame);
     this.pendingCenter = null;
+    this.markDirty();
   }
 
-  toggleWire() { this.setWire(!this.showWire); }
+  // ── Turns (only the centred cell; mapped from a screen-plane button) ──────────
 
-  setWire(on) {
-    this.showWire = on;
-    const chk = document.getElementById('chk-wire');
-    if (chk) chk.checked = on;
-    this._setStatus(on ? 'Wireframe: on' : 'Wireframe: off');
+  // A twist button names a screen-plane via two indices into the core frame basis
+  // (e0→x, e1→y, e2→z) and a direction. Resolve it to the centred cell's concrete
+  // (planeName, sign) using its canonical frame, so the on-screen spin matches the
+  // icon's arrow regardless of which cell is centred.
+  turnScreenPlane(iIdx, jIdx, dir) {
+    if (this.anim.isBusy()) return;
+    const f = frameForCell(this.centralCellIndex);
+    const { planeName, sign } = this._screenPlaneMove(f, iIdx, jIdx, dir);
+    this.executeMove(this.centralCellIndex, planeName, sign);
+  }
+
+  // Rotate a FACE-LAYER of the central cube — i.e. turn the SIDE CELL on that face,
+  // the same move family the shuffle uses. `kScreen` is the face-normal screen axis
+  // (0/1/2 ↔ e0/e1/e2), `sSide` ±1 which of the two faces. The turn plane is the other
+  // two screen axes (so it avoids the depth axis — a clean Rubik's face turn).
+  turnFace(kScreen, sSide, dir) {
+    if (this.anim.isBusy()) return;
+    const f = frameForCell(this.centralCellIndex);
+    const eN = f.e[kScreen];
+    const fAxis = nonzeroAxis(eN);
+    const ci = CELLS.findIndex(c => c.axis === fAxis && c.val === sSide * Math.sign(eN[fAxis]));
+    const [i, j] = [0, 1, 2].filter(k => k !== kScreen);
+    const { planeName, sign } = this._screenPlaneMove(f, i, j, dir);
+    this.executeMove(ci, planeName, sign);
+  }
+
+  // Map a screen-plane (the two screen axes iIdx,jIdx) under frame `f` to a concrete 4D
+  // (planeName, sign). `dir=+1` is a right-handed CCW turn about the THIRD screen axis
+  // e[k] (k = the missing index), so it matches the icon's arrow. `par` is the parity of
+  // (iIdx,jIdx,k): the (0,2) plane is cyclically odd, so without it the Y axis (yaw /
+  // top-bottom faces) would come out inverted relative to roll/pitch.
+  _screenPlaneMove(f, iIdx, jIdx, dir) {
+    const ei = f.e[iIdx], ej = f.e[jIdx];
+    const p = nonzeroAxis(ei), si = Math.sign(ei[p]);
+    const q = nonzeroAxis(ej), sj = Math.sign(ej[q]);
+    const a = Math.min(p, q), b = Math.max(p, q);
+    const k = 3 - iIdx - jIdx;
+    const par = Math.sign((jIdx - iIdx) * (k - iIdx) * (k - jIdx));
+    return { planeName: AXIS_LETTERS[a] + AXIS_LETTERS[b], sign: dir * (p < q ? 1 : -1) * si * sj * par };
+  }
+
+  // Turn the MIDDLE layer of the central cube along screen axis `kScreen` (a true
+  // middle slice — only the centred cube's middle ring moves; see executeMiddleMove).
+  turnMiddle(kScreen, dir) {
+    if (this.anim.isBusy() || this.anim.moveQueue.length >= 3) return;
+    const f = frameForCell(this.centralCellIndex);
+    const fAxis = nonzeroAxis(f.e[kScreen]);
+    const [i, j] = [0, 1, 2].filter(x => x !== kScreen);
+    const { planeName, sign } = this._screenPlaneMove(f, i, j, dir);
+    this.anim.queueMiddle(this.cubies, this.centralCellIndex, fAxis, planeName, sign);
+    this.redoStack = [];
+    this.markDirty();
   }
 
   executeMove(cellIndex, planeName, sign) {
-    if (this.mode === 'demo') return;
-    // Allow queuing up to 3 moves ahead; beyond that, wait for idle
-    if (this.anim.moveQueue.length >= 3) return;
+    if (this.anim.moveQueue.length >= 3) return;   // queue up to 3 ahead
     this.anim.queueMove(this.cubies, cellIndex, planeName, sign);
     this.redoStack = [];
-    this._updateUndoRedo();
+    this.markDirty();
   }
 
   _onMoveComplete(descriptor) {
     if (descriptor) {
       this.undoStack.push(descriptor);
       if (this.undoStack.length > 100) this.undoStack.shift();
-      this._updateUndoRedo();
     }
-    if (this.mode === 'demo') this.demo.onMoveComplete();
+    this.markDirty();
   }
 
   undo() {
@@ -182,217 +258,162 @@ class App {
     const desc = this.undoStack.pop();
     undoMove(this.cubies, desc);
     this.redoStack.push(desc);
-    this._updateUndoRedo();
+    this.markDirty();
   }
 
   redo() {
     if (this.anim.isBusy() || this.redoStack.length === 0) return;
     const desc = this.redoStack.pop();
-    // Re-execute the move
-    const { cellIndex, planeName, sign } = desc;
-    this.anim.queueMove(this.cubies, cellIndex, planeName, sign);
-    this._updateUndoRedo();
+    if (desc.type === 'middle') this.anim.queueMiddle(this.cubies, desc.centralCellIndex, desc.fAxis, desc.planeName, desc.sign);
+    else this.anim.queueMove(this.cubies, desc.cellIndex, desc.planeName, desc.sign);
+    this.markDirty();
   }
 
   resetPuzzle() {
-    if (this.mode === 'demo') this.stopDemo();
-    this.stopScramble();
+    this._endShuffle();
     this.anim.clearQueue();
     this.cubies = buildSolvedPuzzle();
     this.undoStack = [];
     this.redoStack = [];
-    this._updateUndoRedo();
-    this._setStatus('Puzzle reset');
-    this._updateMoveCounter();
+    this.markDirty();
   }
 
-  // ── Scramble (looping start/stop) ────────────────────────────────────────────
-
-  toggleScramble() { this.scrambling ? this.stopScramble() : this.startScramble(); }
-
-  startScramble() {
-    if (this.mode === 'demo') this.stopDemo();
-    this.scrambling = true;
-    this.scrambleQueue = [];
-    this.scrambleLastMove = null;   // fresh start → no restriction on the first move
-    this._updateScrambleBtn();
-    this._setStatus('Scrambling…');
+  // Solved = every cubie home (pos4 === solvedPos4) with identity orientation. The
+  // frame/central cell doesn't matter — a solved puzzle reads solved from any cell.
+  isSolved() {
+    return this.cubies.every(c =>
+      c.pos4.every((v, i) => v === c.solvedPos4[i]) &&
+      c.orient.every((v, i) => Math.abs(v - (i % 5 === 0 ? 1 : 0)) < 1e-6));
   }
 
-  stopScramble() {
-    if (!this.scrambling) return;
-    this.scrambling = false;
-    this.scrambleQueue = [];
-    this._updateScrambleBtn();
-    this._setStatus('Scramble stopped');
+  // ── Shuffle (one-shot, fixed count, full speed) ──────────────────────────────
+
+  shuffle() {
+    if (this.anim.isBusy() || this.shuffling) return;
+    this.shuffleQueue = this._planShuffle(SHUFFLE_TURNS);
+    this.shuffling = true;
+    this._prevSpeed = this.anim.speedFactor;
+    this.anim.speedFactor = SHUFFLE_SPEED;
+    this.markDirty();
   }
 
-  _updateScrambleBtn() {
-    const btn = document.getElementById('btn-scramble');
-    if (!btn) return;
-    btn.textContent = this.scrambling ? 'Stop' : 'Scramble';
-    btn.classList.toggle('active', this.scrambling);
+  _endShuffle() {
+    if (!this.shuffling) return;
+    this.shuffling = false;
+    this.shuffleQueue = [];
+    if (this._prevSpeed != null) { this.anim.speedFactor = this._prevSpeed; this._prevSpeed = null; }
+    this.markDirty();
   }
 
-  // Fed once per idle frame: run one queued action, refilling a round when empty.
-  _scrambleStep() {
-    if (this.scrambleQueue.length === 0) this._planScrambleRound();
-    const act = this.scrambleQueue.shift();
-    if (!act) return;
+  _shuffleStep() {
+    const act = this.shuffleQueue.shift();
+    if (!act) { this._endShuffle(); return; }
     if (act.type === 'move') this.anim.queueMove(this.cubies, act.cellIndex, act.plane, act.sign);
     else this.selectCentralCell(act.cellIndex);
   }
 
-  // One round: 3–7 clean side-cell turns on the current centre (never depth-involving),
-  // then recenter to a different cell.
-  _planScrambleRound() {
-    const centralAxis = CELLS[this.centralCellIndex].axis;
-    const others = [0, 1, 2, 3].filter(a => a !== centralAxis);   // the 3 non-depth axes
-    const n = 3 + Math.floor(Math.random() * 5);                  // 3..7
-    for (let i = 0; i < n; i++) {
-      let move;
-      do {
-        const axis = others[Math.floor(Math.random() * 3)];       // a side-cell axis
-        const cellVal = Math.random() < 0.5 ? 1 : -1;
-        const cellIndex = CELLS.findIndex(c => c.axis === axis && c.val === cellVal);
-        // The only turn plane that avoids the depth axis: the two remaining non-central axes.
-        const [p, q] = others.filter(a => a !== axis);
-        const plane = AXIS_LETTERS[p] + AXIS_LETTERS[q];
-        const turnSign = Math.random() < 0.5 ? 1 : -1;
-        move = { type: 'move', cellIndex, plane, sign: turnSign };
-      } while (this._undoesLastMove(move));                       // never immediately cancel the previous turn
-      this.scrambleLastMove = move;
-      this.scrambleQueue.push(move);
+  // Build the full shuffle plan up front: rounds of 3–7 clean side-cell turns (never
+  // depth-involving) on the current centre, recentering to a different cell between
+  // rounds — the original scramble algorithm, bounded to ~n turns.
+  _planShuffle(n) {
+    const actions = [];
+    let central = this.centralCellIndex, last = null, made = 0;
+    while (made < n) {
+      const roundLen = Math.min(3 + Math.floor(Math.random() * 5), n - made);
+      const others = [0, 1, 2, 3].filter(a => a !== CELLS[central].axis);
+      for (let i = 0; i < roundLen; i++) {
+        let mv;
+        do {
+          const axis = others[Math.floor(Math.random() * 3)];
+          const cellVal = Math.random() < 0.5 ? 1 : -1;
+          const cellIndex = CELLS.findIndex(c => c.axis === axis && c.val === cellVal);
+          const [p, q] = others.filter(a => a !== axis);
+          mv = { type: 'move', cellIndex, plane: AXIS_LETTERS[p] + AXIS_LETTERS[q],
+                 sign: Math.random() < 0.5 ? 1 : -1 };
+        } while (last && mv.cellIndex === last.cellIndex && mv.plane === last.plane && mv.sign === -last.sign);
+        last = mv; actions.push(mv); made++;
+      }
+      if (made < n) {
+        let next = central; while (next === central) next = Math.floor(Math.random() * 8);
+        actions.push({ type: 'center', cellIndex: next });
+        central = next; last = null;
+      }
     }
-    let next = this.centralCellIndex;
-    while (next === this.centralCellIndex) next = Math.floor(Math.random() * 8);
-    this.scrambleQueue.push({ type: 'center', cellIndex: next });
+    return actions;
   }
 
-  // A move cancels the previous one if it's the same cell + plane with the opposite
-  // sign. (Recentering doesn't touch puzzle state, so this holds across rounds too.)
-  _undoesLastMove(m) {
-    const L = this.scrambleLastMove;
-    return !!L && m.cellIndex === L.cellIndex && m.plane === L.plane && m.sign === -L.sign;
+  // ── View mode ────────────────────────────────────────────────────────────────
+
+  setViewMode(mode) {
+    if (mode === 'semi') return;               // placeholder, disabled
+    this.viewMode = mode;
+    const radio = document.querySelector(`input[name="viewmode"][value="${mode}"]`);
+    if (radio) radio.checked = true;
+    this.markDirty();
   }
 
-  // ── Demo mode ────────────────────────────────────────────────────────────────
-
-  startDemo() {
-    this.resetPuzzle();
-    this.mode = 'demo';
-    document.getElementById('btn-regular').classList.remove('active');
-    document.getElementById('btn-demo').classList.add('active');
-    document.getElementById('demo-controls').classList.remove('hidden');
-    this.demo.start(0);
-    this._setStatus('Demo playing…');
+  cycleViewMode() {
+    this.setViewMode(this.viewMode === 'shell-wire' ? 'total-wire' : 'shell-wire');
   }
 
-  stopDemo() {
-    this.demo.stop();
-    this.mode = 'regular';
-    document.getElementById('btn-regular').classList.add('active');
-    document.getElementById('btn-demo').classList.remove('active');
-    document.getElementById('demo-controls').classList.add('hidden');
-    this.anim.clearQueue();
-    this._setStatus('Demo stopped');
-    this._updateMoveCounter();
-  }
-
-  toggleDemoPlayPause() {
-    if (this.mode !== 'demo') { this.startDemo(); return; }
-    if (this.demo.playing) { this.demo.pause(); this._setStatus('Demo paused'); }
-    else { this.demo.resume(); this._setStatus('Demo playing…'); }
-  }
-
-  demoPrev() {
-    if (this.mode !== 'demo') return;
-    this.demo.pause();
-    this.demo.stepBackward();
-    this._updateMoveCounter(this.demo.index + 1);
-  }
-
-  demoNext() {
-    if (this.mode !== 'demo') return;
-    if (this.anim.isBusy()) return;
-    const move = this.demo.sequence[this.demo.index + 1];
-    if (move) {
-      this.demo.index++;
-      this.demo.waitingForAnim = true;
-      this.anim.queueMove(this.cubies, move.cellIndex, move.planeName, move.sign);
-      this._updateMoveCounter(this.demo.index + 1);
-    }
+  setControlSet(set) {
+    this.controlSet = set;
+    setControlSet(set);                        // module helper: show/hide the button groups
   }
 
   // ── UI binding ───────────────────────────────────────────────────────────────
 
   _bindUI() {
-    document.getElementById('btn-regular').addEventListener('click', () => {
-      if (this.mode === 'demo') this.stopDemo();
-    });
-    document.getElementById('btn-demo').addEventListener('click', () => {
-      if (this.mode !== 'demo') this.startDemo();
-    });
-    document.getElementById('btn-reset-puzzle').addEventListener('click', () => this.resetPuzzle());
-    document.getElementById('btn-reset-view').addEventListener('click', () => this.resetView());
-    document.getElementById('btn-scramble').addEventListener('click', () => this.toggleScramble());
-    document.getElementById('chk-wire').addEventListener('change', e => this.setWire(e.target.checked));
+    const menu = document.getElementById('menu-overlay');
+    const confirm = document.getElementById('confirm-overlay');
+    const show = el => el.classList.remove('hidden');
+    const hide = el => el.classList.add('hidden');
 
-    document.getElementById('btn-undo').addEventListener('click', () => this.undo());
-    document.getElementById('btn-redo').addEventListener('click', () => this.redo());
+    document.getElementById('menu-button').addEventListener('click', () => show(menu));
+    document.getElementById('menu-close').addEventListener('click', () => hide(menu));
+    menu.addEventListener('click', e => { if (e.target === menu) hide(menu); });
 
-    document.getElementById('btn-demo-play').addEventListener('click', () => {
-      if (this.mode !== 'demo') this.startDemo();
-      else { this.demo.resume(); this._setStatus('Demo playing…'); }
+    // Shared confirm dialog: only prompt when there's progress to lose (puzzle not
+    // solved); otherwise run the action straight away.
+    const confirmP = confirm.querySelector('p');
+    const confirmOk = document.getElementById('confirm-ok');
+    const guard = (msg, okLabel, action) => {
+      if (this.isSolved()) { action(); return; }
+      confirmP.textContent = msg;
+      confirmOk.textContent = okLabel;
+      this._confirmAction = action;
+      show(confirm);
+    };
+
+    document.getElementById('btn-shuffle').addEventListener('click', () => {
+      hide(menu);
+      guard('Shuffle the puzzle? Your current progress will be lost.', 'Shuffle', () => this.shuffle());
     });
-    document.getElementById('btn-demo-pause').addEventListener('click', () => {
-      this.demo.pause(); this._setStatus('Demo paused');
+    document.getElementById('btn-reset').addEventListener('click', () => {
+      hide(menu);
+      guard("Reset the puzzle to solved? This can't be undone.", 'Reset', () => this.resetPuzzle());
     });
-    document.getElementById('btn-demo-stop').addEventListener('click', () => this.stopDemo());
-    document.getElementById('btn-demo-prev').addEventListener('click', () => this.demoPrev());
-    document.getElementById('btn-demo-next').addEventListener('click', () => this.demoNext());
+
+    document.getElementById('confirm-cancel').addEventListener('click', () => hide(confirm));
+    confirmOk.addEventListener('click', () => { hide(confirm); if (this._confirmAction) this._confirmAction(); });
+    confirm.addEventListener('click', e => { if (e.target === confirm) hide(confirm); });
 
     document.getElementById('speed-slider').addEventListener('input', e => {
-      const v = parseInt(e.target.value);
-      this.anim.speedFactor = v / 5; // 5 = 1x speed
+      this.anim.speedFactor = parseInt(e.target.value) / 5;   // 5 = 1×
     });
-
-    document.getElementById('demo-loop').addEventListener('change', e => {
-      this.demo.loop = e.target.checked;
-    });
-
-    for (const btn of document.querySelectorAll('[data-action]')) {
-      btn.addEventListener('click', () => this._handleViewBtn(btn.dataset.action));
+    for (const radio of document.querySelectorAll('input[name="viewmode"]')) {
+      radio.addEventListener('change', e => { if (e.target.checked) this.setViewMode(e.target.value); });
+    }
+    for (const radio of document.querySelectorAll('input[name="controlset"]')) {
+      radio.addEventListener('change', e => { if (e.target.checked) this.setControlSet(e.target.value); });
     }
   }
+}
 
-  _handleViewBtn(action) {
-    const step = Math.PI / 18;
-    switch(action) {
-      case 'rotate-left':  this.orbit(-step, 0); break;
-      case 'rotate-right': this.orbit( step, 0); break;
-      case 'rotate-up':    this.orbit(0, -step); break;
-      case 'rotate-down':  this.orbit(0,  step); break;
-      case 'zoom-in':      this.zoomBy(1.15); break;
-      case 'zoom-out':     this.zoomBy(1 / 1.15); break;
-      case 'reset-view':   this.resetView(); break;
-    }
-  }
-
-  _setStatus(msg) {
-    document.getElementById('status-text').textContent = msg;
-  }
-
-  _updateUndoRedo() {
-    document.getElementById('btn-undo').disabled = this.undoStack.length === 0;
-    document.getElementById('btn-redo').disabled = this.redoStack.length === 0;
-  }
-
-  _updateMoveCounter(n = null) {
-    const el = document.getElementById('move-index');
-    if (n === null) el.textContent = '—';
-    else el.textContent = `${n} / 48`;
-  }
+function nonzeroAxis(v) {
+  let k = 0, best = 0;
+  for (let i = 0; i < 4; i++) if (Math.abs(v[i]) > best) { best = Math.abs(v[i]); k = i; }
+  return k;
 }
 
 function easeInOut(t) { return t < 0.5 ? 2*t*t : 1 - Math.pow(-2*t+2, 2)/2; }

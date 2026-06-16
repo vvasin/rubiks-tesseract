@@ -1,72 +1,89 @@
-// Input handling: mouse drag, keyboard, UI buttons
-import { CELLS, getCellPlanes } from './puzzle.js';
+// Input handling + DOM builders for the game shell.
+//   • One pointer handler on the canvas: drag anywhere orbits all 9 synchronized
+//     views; a tap on a cell sub-view tile centres that cell; two fingers pinch-zoom.
+//   • Builds the 8 cell tiles and the 6 embedded twist buttons.
+import { CELLS } from './puzzle.js';
+import { TURN_BUTTONS, turnIcon, faceIcon, middleIcon } from './icons.js';
 
-const VIEW_STEP = Math.PI / 36; // per arrow-key press
-const ZOOM_STEP = 1.0015;       // per wheel-delta unit
+const VIEW_STEP = Math.PI / 36;   // per arrow-key press
+const ZOOM_STEP = 1.0015;         // per wheel-delta unit
+const TAP_SLOP  = 10;             // px of movement still counted as a tap (not a drag)
 
 export class Controls {
   constructor(canvas, app) {
     this.canvas = canvas;
     this.app = app;
-    this.drag = null;
+    this.pointers = new Map();     // active pointerId → {x, y}
+    this.pinchDist = null;
+    this.down = null;              // {x, y, moved, cell} for tap/drag tracking
     this._bindCanvas();
     this._bindKeyboard();
   }
 
+  // Which cell tile (if any) is under a client point. Tiles are pointer-events:none,
+  // so we hit-test their rectangles ourselves.
+  _tileAt(x, y) {
+    for (const el of document.querySelectorAll('.cell-tile')) {
+      const r = el.getBoundingClientRect();
+      if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return +el.dataset.cell;
+    }
+    return -1;
+  }
+
   _bindCanvas() {
     const c = this.canvas;
-    c.addEventListener('mousedown', e => this._onMouseDown(e));
-    c.addEventListener('mousemove', e => this._onMouseMove(e));
-    c.addEventListener('mouseup',   () => this._onMouseUp());
-    c.addEventListener('mouseleave', () => this._onMouseUp());
-    // Mouse wheel → zoom (trackpad scroll also lands here).
+    c.addEventListener('pointerdown', e => this._onDown(e));
+    c.addEventListener('pointermove', e => this._onMove(e));
+    c.addEventListener('pointerup',   e => this._onUp(e));
+    c.addEventListener('pointercancel', e => this._onUp(e));
     c.addEventListener('wheel', e => {
       this.app.zoomBy(Math.pow(ZOOM_STEP, -e.deltaY));
       e.preventDefault();
     }, { passive: false });
-    // Touch support: 1 finger orbits, 2 fingers pinch-zoom.
-    c.addEventListener('touchstart', e => {
-      if (e.touches.length === 2) { this.pinchDist = this._touchDist(e); this.drag = null; }
-      else { const t = e.touches[0]; this._onMouseDown({ clientX: t.clientX, clientY: t.clientY }); }
-      e.preventDefault();
-    }, { passive: false });
-    c.addEventListener('touchmove', e => {
-      if (e.touches.length === 2) {
-        const d = this._touchDist(e);
-        if (this.pinchDist) this.app.zoomBy(d / this.pinchDist);
-        this.pinchDist = d;
-      } else {
-        const t = e.touches[0];
-        this._onMouseMove({ clientX: t.clientX, clientY: t.clientY });
-      }
-      e.preventDefault();
-    }, { passive: false });
-    c.addEventListener('touchend', e => { if (e.touches.length === 0) { this._onMouseUp(); this.pinchDist = null; } });
   }
 
-  _touchDist(e) {
-    const dx = e.touches[0].clientX - e.touches[1].clientX;
-    const dy = e.touches[0].clientY - e.touches[1].clientY;
-    return Math.hypot(dx, dy);
+  _onDown(e) {
+    this.canvas.setPointerCapture?.(e.pointerId);
+    this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (this.pointers.size === 2) {
+      this.pinchDist = this._pinchDist();
+      this.down = null;                    // a second finger cancels the tap/drag
+    } else {
+      this.down = { x: e.clientX, y: e.clientY, moved: false, cell: this._tileAt(e.clientX, e.clientY) };
+    }
+    e.preventDefault();
   }
 
-  _onMouseDown(e) {
-    this.drag = { x: e.clientX, y: e.clientY };
+  _onMove(e) {
+    const p = this.pointers.get(e.pointerId);
+    if (!p) return;
+    const px = p.x, py = p.y;
+    p.x = e.clientX; p.y = e.clientY;
+
+    if (this.pointers.size >= 2) {
+      const d = this._pinchDist();
+      if (this.pinchDist) this.app.zoomBy(d / this.pinchDist);
+      this.pinchDist = d;
+      return;
+    }
+    if (!this.down) return;
+    const dx = e.clientX - px, dy = e.clientY - py;
+    if (Math.hypot(e.clientX - this.down.x, e.clientY - this.down.y) > TAP_SLOP) this.down.moved = true;
+    this.app.orbit(dx * 0.008, dy * 0.008);
+    e.preventDefault();
   }
 
-  _onMouseMove(e) {
-    if (!this.drag) return;
-    const dx = e.clientX - this.drag.x;
-    const dy = e.clientY - this.drag.y;
-    this.drag = { x: e.clientX, y: e.clientY };
-
-    const sensitivity = 0.008;
-    // Horizontal drag → yaw, vertical drag → pitch. Decoupled, so no roll.
-    this.app.orbit(dx * sensitivity, dy * sensitivity);
+  _onUp(e) {
+    this.pointers.delete(e.pointerId);
+    if (this.pointers.size < 2) this.pinchDist = null;
+    const d = this.down;
+    this.down = null;
+    if (d && !d.moved && d.cell >= 0) this.app.selectCentralCell(d.cell);
   }
 
-  _onMouseUp() {
-    this.drag = null;
+  _pinchDist() {
+    const [a, b] = [...this.pointers.values()];
+    return Math.hypot(a.x - b.x, a.y - b.y);
   }
 
   _bindKeyboard() {
@@ -75,122 +92,92 @@ export class Controls {
 
   _onKey(e) {
     if (e.target.tagName === 'INPUT') return;
-
     switch (e.key) {
       case '1': case '2': case '3': case '4':
       case '5': case '6': case '7': case '8':
-        this.app.selectCentralCell(parseInt(e.key) - 1);
-        break;
-      case 'ArrowLeft':
-        this.app.orbit(-VIEW_STEP, 0);
-        e.preventDefault();
-        break;
-      case 'ArrowRight':
-        this.app.orbit(VIEW_STEP, 0);
-        e.preventDefault();
-        break;
-      case 'ArrowUp':
-        this.app.orbit(0, -VIEW_STEP);
-        e.preventDefault();
-        break;
-      case 'ArrowDown':
-        this.app.orbit(0, VIEW_STEP);
-        e.preventDefault();
-        break;
-      case 'r': case 'R':
-        this.app.resetPuzzle();
-        break;
-      case 'v': case 'V':
-        this.app.resetView();
-        break;
-      case 'w': case 'W':
-        this.app.toggleWire();
-        break;
-      case ' ':
-        this.app.toggleDemoPlayPause();
-        e.preventDefault();
-        break;
-      case 'Escape':
-        this.app.stopDemo();
-        break;
-      case 'd': case 'D':
-        this.app.startDemo();
-        break;
-      case 's': case 'S':
-        if (!e.shiftKey) this.app.toggleScramble();
-        break;
-      case 'u': case 'U':
-        if (e.shiftKey) this.app.redo();
-        else this.app.undo();
-        break;
+        this.app.selectCentralCell(parseInt(e.key) - 1); break;
+      case 'ArrowLeft':  this.app.orbit(-VIEW_STEP, 0); e.preventDefault(); break;
+      case 'ArrowRight': this.app.orbit( VIEW_STEP, 0); e.preventDefault(); break;
+      case 'ArrowUp':    this.app.orbit(0, -VIEW_STEP); e.preventDefault(); break;
+      case 'ArrowDown':  this.app.orbit(0,  VIEW_STEP); e.preventDefault(); break;
+      case 'r': case 'R': this.app.resetPuzzle(); break;
+      case 'v': case 'V': this.app.resetView(); break;
+      case 'w': case 'W': this.app.cycleViewMode(); break;
+      case 'u': case 'U': e.shiftKey ? this.app.redo() : this.app.undo(); break;
     }
   }
 }
 
-// Build the cell control panel HTML and wire up buttons
-export function buildCellPanel(panelEl, app) {
-  const scroll = panelEl.querySelector('.panel-scroll');
-  scroll.innerHTML = '';
-
-  CELLS.forEach((cell, cellIndex) => {
-    const planes = getCellPlanes(cellIndex);
-    const colorHex = rgbToHex(cell.color);
-
-    const group = document.createElement('div');
-    group.className = 'cell-group';
-    group.dataset.cellIndex = cellIndex;
-
-    const header = document.createElement('div');
-    header.className = 'cell-header';
-    header.innerHTML = `
-      <span class="cell-color-dot" style="background:${colorHex}"></span>
-      <span class="cell-name">Cell ${cell.name}</span>
-      <span class="cell-central-badge" style="display:none">●</span>
-    `;
-    header.addEventListener('click', () => app.selectCentralCell(cellIndex));
-
-    const body = document.createElement('div');
-    body.className = 'cell-body';
-
-    const centralBtn = document.createElement('button');
-    centralBtn.className = 'cell-use-central';
-    centralBtn.textContent = 'Use as Central';
-    centralBtn.addEventListener('click', e => {
-      e.stopPropagation();
-      app.selectCentralCell(cellIndex);
-    });
-    body.appendChild(centralBtn);
-
-    for (const plane of planes) {
-      const row = document.createElement('div');
-      row.className = 'move-row';
-
-      for (const sign of [+1, -1]) {
-        const btn = document.createElement('button');
-        btn.className = 'move-btn';
-        btn.textContent = `${plane} ${sign > 0 ? '+90°' : '−90°'}`;
-        btn.addEventListener('click', () => app.executeMove(cellIndex, plane, sign));
-        row.appendChild(btn);
-      }
-      body.appendChild(row);
-    }
-
-    group.appendChild(header);
-    group.appendChild(body);
-    scroll.appendChild(group);
+// Build the 8 cell tiles into the top/bottom strips (cells 0–3 top, 4–7 bottom).
+export function buildCellTiles() {
+  const top = document.getElementById('cells-top');
+  const bottom = document.getElementById('cells-bottom');
+  top.innerHTML = ''; bottom.innerHTML = '';
+  CELLS.forEach((cell, i) => {
+    const tile = document.createElement('div');
+    tile.className = 'cell-tile';
+    tile.dataset.cell = i;
+    tile.style.setProperty('--cell', rgbToHex(cell.color));
+    tile.innerHTML = `<span class="tile-name">${cell.name}</span>`;
+    (i < 4 ? top : bottom).appendChild(tile);
   });
 }
 
-export function updateCentralBadge(panelEl, centralCellIndex) {
-  const groups = panelEl.querySelectorAll('.cell-group');
-  groups.forEach((g, i) => {
-    const badge = g.querySelector('.cell-central-badge');
-    if (badge) badge.style.display = i === centralCellIndex ? 'inline' : 'none';
-    g.style.borderColor = i === centralCellIndex ? '#4af' : '';
+// Mark the centred cell's tile.
+export function setCenteredTile(idx) {
+  document.querySelectorAll('.cell-tile').forEach(el => {
+    el.classList.toggle('centered', +el.dataset.cell === idx);
+  });
+}
+
+// One layer-turn button for axis k: outer slabs → turnFace, middle slab → turnMiddle.
+function slabBtn(app, k, slab, dir) {
+  if (slab === 'mid') return { html: middleIcon(k, dir), fn: () => app.turnMiddle(k, dir) };
+  const s = slab === 'top' ? +1 : -1;
+  return { html: faceIcon(k, s, dir), fn: () => app.turnFace(k, s, dir) };
+}
+
+// The 6 layer-turn buttons (3 slabs × 2 dirs) for one axis, ordered for the grid:
+// 'h' = 3 cols (dir-major rows: + then −); 'v' = 2 cols (slab-major rows).
+function slabButtons(app, k, orient) {
+  const slabs = ['top', 'mid', 'bot'], dirs = [+1, -1], out = [];
+  if (orient === 'h') for (const d of dirs) for (const s of slabs) out.push(slabBtn(app, k, s, d));
+  else                for (const s of slabs) for (const d of dirs) out.push(slabBtn(app, k, s, d));
+  return out;
+}
+
+function fillGroup(id, set, cls, buttons) {
+  const g = document.getElementById(id);
+  g.className = `turn-group ${cls}`;
+  g.dataset.set = set;
+  g.innerHTML = '';
+  for (const b of buttons) {
+    const el = document.createElement('button');
+    el.className = 'turn-btn';
+    el.innerHTML = b.html;
+    el.addEventListener('click', b.fn);
+    g.appendChild(el);
+  }
+}
+
+// Build the 4 twist-button groups framing the cube: bottom = whole-cube rotation;
+// top/left/right = per-axis layer turns (top/middle/bottom slab × 2 dirs).
+export function buildTurnControls(app) {
+  fillGroup('turn-bottom', 'central', 'grid-3col',
+    TURN_BUTTONS.map(b => ({ html: turnIcon(b.key, b.dir), fn: () => app.turnScreenPlane(b.iIdx, b.jIdx, b.dir) })));
+  fillGroup('turn-top',   'sides', 'grid-3col', slabButtons(app, 1, 'h'));  // screen Y axis
+  fillGroup('turn-left',  'sides', 'grid-2col', slabButtons(app, 0, 'v'));  // screen X axis
+  fillGroup('turn-right', 'sides', 'grid-2col', slabButtons(app, 2, 'v'));  // screen Z axis
+}
+
+// Show the chosen control set(s): 'central' (bottom) | 'sides' (top/left/right) | 'both'.
+export function setControlSet(set) {
+  document.querySelectorAll('.turn-group').forEach(g => {
+    g.classList.toggle('hidden', !(set === 'both' || g.dataset.set === set));
   });
 }
 
 function rgbToHex([r, g, b]) {
-  const toHex = v => Math.round(v * 255).toString(16).padStart(2, '0');
-  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+  const h = v => Math.round(v * 255).toString(16).padStart(2, '0');
+  return `#${h(r)}${h(g)}${h(b)}`;
 }

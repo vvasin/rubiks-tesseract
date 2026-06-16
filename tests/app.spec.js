@@ -34,28 +34,47 @@ test('loads and renders a non-blank scene', async ({ page }) => {
   expect(errors).toEqual([]);
 });
 
-test('survives turns, scramble, recenter, and wireframe without errors', async ({ page }) => {
+test('survives turns, shuffle, recenter, and view modes without errors', async ({ page }) => {
   const errors = await gotoApp(page);
   await page.evaluate(async () => {
     const a = window.__app;
-    const idle = () => new Promise(r => {
-      const t = setInterval(() => { if (a.anim.isIdle()) { clearInterval(t); r(); } }, 25);
+    // Wait until nothing is animating, centering, or shuffling.
+    const settled = () => new Promise(r => {
+      const t = setInterval(() => {
+        if (a.anim.isIdle() && !a.shuffling && !a.pendingCenter) { clearInterval(t); r(); }
+      }, 25);
     });
     a.anim.speedFactor = 4;                       // run animations fast for the test
-    a.executeMove(2, 'XW', +1); await idle();     // depth-involving turn
-    a.executeMove(0, 'YZ', -1); await idle();
-    a.startScramble();                             // looping scramble
-    await new Promise(r => setTimeout(r, 800));    // let it run a few rounds
-    a.stopScramble();           await idle();
-    a.selectCentralCell(5);     await idle();      // recentering
-    a.selectCentralCell(0);     await idle();
-    a.setWire(true);
-    a.executeMove(4, 'XY', +1); await idle();      // turn in wireframe mode
-    a.setWire(false);
+    a.executeMove(2, 'XW', +1); await settled();  // depth-involving turn
+    a.executeMove(0, 'YZ', -1); await settled();
+    a.turnScreenPlane(0, 2, +1); await settled(); // a centred-cell twist via the button path
+    a.shuffle();                await settled();  // one-shot shuffle (20 turns, full speed)
+    a.selectCentralCell(5);     await settled();  // recentering
+    a.selectCentralCell(0);     await settled();
+    a.setViewMode('total-wire');
+    a.executeMove(4, 'XY', +1); await settled();  // turn in total-wireframe mode
+    a.setViewMode('shell-wire');
     a.resetPuzzle();
   });
   await page.waitForTimeout(200);
   expect(errors).toEqual([]);
+});
+
+test('central-cell switching is stable (returns to the same orientation)', async ({ page }) => {
+  await gotoApp(page);
+  const stable = await page.evaluate(async () => {
+    const a = window.__app;
+    const settled = () => new Promise(r => {
+      const t = setInterval(() => {
+        if (a.anim.isIdle() && !a.shuffling && !a.pendingCenter) { clearInterval(t); r(); }
+      }, 25);
+    });
+    a.anim.speedFactor = 6;
+    const start = JSON.stringify(a.coreFrame);     // canonical frame for cell 0 at boot
+    for (const c of [5, 2, 7, 0]) { a.selectCentralCell(c); await settled(); }
+    return JSON.stringify(a.coreFrame) === start;   // round-trip lands exactly back
+  });
+  expect(stable).toBe(true);
 });
 
 test('captures reference screenshots', async ({ page }) => {
@@ -63,7 +82,7 @@ test('captures reference screenshots', async ({ page }) => {
   await mkdir(SHOTS, { recursive: true });
   const canvas = page.locator('#glcanvas');
   await writeFile(`${SHOTS}/idle.png`, await canvas.screenshot());
-  await page.evaluate(() => window.__app.setWire(true));
+  await page.evaluate(() => window.__app.setViewMode('total-wire'));
   await page.waitForTimeout(200);
   await writeFile(`${SHOTS}/wireframe.png`, await canvas.screenshot());
 });

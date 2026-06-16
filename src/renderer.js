@@ -70,14 +70,45 @@ export class Renderer {
     if (c.width !== w || c.height !== h) { c.width = w; c.height = h; this.gl.viewport(0, 0, w, h); }
   }
 
-  draw(cells, viewRot, segments = null, camDist = 15) {
+  // Begin a frame: size the backing store and clear the whole canvas once. Call
+  // before drawing the per-view rectangles with drawView().
+  beginFrame() {
     const gl = this.gl;
     this.resize();
+    gl.disable(gl.SCISSOR_TEST);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  }
+
+  // Draw one view (the main projection or a cell sub-view) into a device-pixel
+  // rectangle {x, y, w, h} (GL origin: bottom-left). Each view gets its own scissored
+  // viewport + depth clear, so the 9 synchronized views share one GL context cleanly.
+  // `zoom` magnifies (crops) the view WITHOUT moving the camera — narrowing the FOV at
+  // a fixed `camDist`, so a sub-view keeps the same perspective as the main view but
+  // fills its tile.
+  drawView(cells, viewRot, segments, camDist, rect, zoom = 1) {
+    const gl = this.gl;
+    if (!rect || rect.w < 2 || rect.h < 2) return;
+    gl.enable(gl.SCISSOR_TEST);
+    gl.viewport(rect.x, rect.y, rect.w, rect.h);
+    gl.scissor(rect.x, rect.y, rect.w, rect.h);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    this._drawGeometry(cells, viewRot, segments, camDist, rect.w / rect.h, zoom);
+  }
+
+  // Full-canvas single-view draw (kept for simple/debug use).
+  draw(cells, viewRot, segments = null, camDist = 15) {
+    this.beginFrame();
+    this.drawView(cells, viewRot, segments, camDist,
+      { x: 0, y: 0, w: this.canvas.width, h: this.canvas.height });
+  }
+
+  _drawGeometry(cells, viewRot, segments, camDist, aspect, zoom = 1) {
+    const gl = this.gl;
     gl.useProgram(this.program);
 
-    const aspect = this.canvas.width / this.canvas.height;
-    gl.uniformMatrix4fv(this.loc.u_proj, false, perspectiveMatrix(Math.PI / 3.2, aspect, 0.1, 200));
+    const proj = perspectiveMatrix(Math.PI / 3.2, aspect, 0.1, 200);
+    if (zoom !== 1) { proj[0] *= zoom; proj[5] *= zoom; }   // crop-zoom (narrow FOV)
+    gl.uniformMatrix4fv(this.loc.u_proj, false, proj);
     gl.uniformMatrix4fv(this.loc.u_view, false, lookAtMatrix([0, 0, camDist], [0, 0, 0], [0, 1, 0]));
     gl.uniformMatrix3fv(this.loc.u_rot, false, viewRot);
     gl.uniform3fv(this.loc.u_lightDir, [0.5, 0.7, 0.6]);

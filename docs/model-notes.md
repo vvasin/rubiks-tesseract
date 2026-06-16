@@ -192,3 +192,34 @@ that reveal the wireframe (drawn just behind it, slightly shrunk). It needs no b
 front sorting and leaves the opaque depth pipeline untouched — the alpha route would have
 re-introduced the sorting/blending fragility we spent §1–§7 avoiding. The dither pattern
 is screen-space and stable per pixel, so a cubie dissolves cleanly rather than sparkling.
+
+---
+
+## 9. The game: 9 views + stable centering
+
+The single projection became a **mobile-first game** of 9 synchronized views — the main
+tesseract plus 8 cell sub-views, all sharing one turntable `viewRot`. Two notes for a
+future session, because both look arbitrary out of context.
+
+**Sub-views (`computeCellCube`).** A cell shown "as if central" with *only its own cubies*
+is already a clean 3×3×3 Rubik's cube — that falls straight out of the existing model: with
+`frame = frameForCell(i)` the cell's 27 cubies sit at depth +1 (the inner cube), their
+along-axis (inner/outer) mini-cells read dark, and the 6 side stickers become the cube
+faces. So a sub-view is just `computeCells` restricted to that cell, forced solid. During a
+neighbouring cell's turn, cubies slide in/out of the cell; we keep a cubie while it's on the
+cell's 4D side (`center4·axis·val > 0.5`) so it animates to/from the boundary instead of
+popping. No new projection — the sub-view *is* the main view's central look, isolated.
+
+**Stable centering (canonical frames + SO(4) geodesic).** The old centering composed a
+single-plane `rotateFrame` and committed the *composed* frame, so the free axes drifted:
+A→B→A could come back with a different face forward. Fix: each cell has a fixed **canonical
+frame** `frameForCell(i)`, forced right-handed (det +1 — swap the last two free axes when
+the naive frame is left-handed) so that *every* cell→cell relation is a proper SO(4)
+rotation. Centering interpolates that rotation along its geodesic via a **double-quaternion
+(van Elfrinkhof) factorization** `M = L(λ)·R(ρ)`, slerping λ and ρ from identity
+(`so4Decompose`/`so4Slerp` in `math4d.js`). This is smooth at *every* angle — crucially the
+180° opposite-cell hop, where a naive matrix/vector lerp passes through the zero vector and
+collapses. The animation **commits the destination's canonical frame exactly**, so revisits
+are bit-identical. Why all-same-handedness matters: mixed handedness would make some pairs
+an improper rotation (a reflection) with no continuous SO(4) path — uniform det +1 removes
+that. The retired `rotateFrame`/`centeringPlan` are gone; don't reintroduce them.

@@ -1,8 +1,14 @@
 # Rubik's Tesseract — agent brief
 
-Interactive WebGL visualization of a **3×3×3×3 Rubik's tesseract**. Pure client-side
-vanilla JS (ES modules, WebGL 1.0), no build step, no dependencies. The point is to make
-the 4D puzzle *readable* through an interactive 3D projection — not to be a solver.
+A small, **mobile-first playable game** of a **3×3×3×3 Rubik's tesseract**. Pure
+client-side vanilla JS (ES modules, WebGL 1.0), no build step, no dependencies. It makes
+the 4D puzzle *readable* through an interactive 3D projection — there is no solver.
+
+The screen is **9 synchronized views**: the big main tesseract projection plus 8 small
+cell sub-views (4 top + 4 bottom), each showing one cell as a plain 3×3×3 Rubik's cube.
+You twist the **centred** cell with on-canvas icon buttons (layer turns + whole-cube
+rotation, in groups around the cube), and tap a sub-view to bring a different cell to
+centre. All 9 views share one turntable orientation.
 
 This file is the orientation for a future session. It records the **current** design and
 the non-obvious decisions behind it; it is not the original spec (we diverged from that
@@ -27,9 +33,12 @@ tests; correctness is verified by driving the real app (Playwright). The app exp
 const a = window.__app;
 a.viewYaw = -0.6; a.viewPitch = 0.5; a.viewZoom = 1.4; a.viewRot = a._composeViewRot();
 a.anim.speedFactor = 0.1;           // slow animations down to capture mid-transition
-a.executeMove(2, 'XW', +1);         // cellIndex, planeName, sign
-a.selectCentralCell(4);             // animated recentering
-a.coreFrame;                        // current 4D frame {e:[e0,e1,e2], eF}
+a.executeMove(2, 'XW', +1);         // cellIndex, planeName, sign (any cell/plane)
+a.turnScreenPlane(0, 2, +1);        // twist the CENTRED cell via a screen-plane button (iIdx,jIdx,dir)
+a.selectCentralCell(4);             // animated, stable recentering
+a.shuffle();                        // one-shot scramble (SHUFFLE_TURNS moves, full speed)
+a.setViewMode('total-wire');        // 'shell-wire' | 'total-wire'
+a.coreFrame;                        // current 4D frame {e:[e0,e1,e2], eF} — at rest, a canonical frame
 ```
 To capture a specific moment in a turn, poll `a.anim.active` and compute progress from
 `(performance.now() - active.startTime) / (active.duration / a.anim.speedFactor)`. The
@@ -37,15 +46,15 @@ canvas uses `preserveDrawingBuffer`, so it can be read back via a 2D canvas in t
 
 ## Files
 
-- `index.html` / `style.css` — top bar, canvas, view overlay, per-cell side panel, status bar.
-- `src/main.js` — `App`: state, render loop (`_loop`), view (yaw/pitch/zoom), centering, UI wiring. Bootstraps `window.__app`.
-- `src/math4d.js` — 4×4 / 3×3 matrix + 4D vector helpers (`mat4PlaneRotation`, `mat4MulVec4`, `PLANE_AXES`, `mat3AxisRotation`, …).
-- `src/puzzle.js` — cubie model, `CELLS` (the 8 cells + colors), `executeMove`/`undoMove`, `buildDemoSequence`.
-- `src/projection.js` — **the heart**: 4D→3D projection, cubie geometry, color fade, wireframes. Almost all design decisions live here.
-- `src/renderer.js` — WebGL: opaque, depth-tested, **no back-face culling**. Draws solid quads + `gl.LINES` for wireframe.
-- `src/animation.js` — `AnimationEngine`: move/centering queue, easing, per-frame state. `MOVE_DURATION=360ms`, `TRANSITION_DURATION=620ms`, `speedFactor`.
-- `src/controls.js` — mouse/touch/keyboard input; builds the per-cell control panel.
-- `src/demo.js` — `DemoMode`: sequenced playback of the 48 moves.
+- `index.html` / `style.css` — game shell: one full-area canvas, the 4-top/4-bottom cell tiles, the stage (menu button + the 4 twist-button groups), and the menu/confirm overlays. Mobile-first, `dvh` + safe-area insets; `#app` width = `min(100vw,100dvh)` (square-capped) so the main view grows on wide screens, with the cell strips capped/centered.
+- `src/main.js` — `App`: state, **9-view render loop** (`_loop`/`_render`, dirty-flag redraw), view (yaw/pitch/zoom), stable centering, screen-plane→move dispatch (`turnScreenPlane`), shuffle, menu/view-mode wiring. Bootstraps `window.__app`.
+- `src/math4d.js` — 4×4 / 3×3 matrix + 4D vector helpers (`mat4PlaneRotation`, `mat4MulVec4`, `PLANE_AXES`, …) **+ the SO(4) geodesic** (`so4Slerp`, `so4Decompose`, `mat4Det`, `mat4FromCols`) used by stable centering.
+- `src/puzzle.js` — cubie model, `CELLS` (the 8 cells + colors), `executeMove`/`undoMove`, and the middle-slice (`executeMiddleMove`/`middleNetSign`).
+- `src/projection.js` — **the heart**: 4D→3D projection, cubie geometry, color fade, wireframes, canonical frames + `slerpFrame`, and `computeCellCube` (one cell as a solid cube, for sub-views). Almost all design decisions live here.
+- `src/renderer.js` — WebGL: opaque, depth-tested, **no back-face culling**. `beginFrame()` clears the whole canvas; `drawView(cells, viewRot, segments, camDist, rect, zoom)` renders one scissored viewport (`zoom` crops/magnifies without moving the camera) — called once per view.
+- `src/animation.js` — `AnimationEngine`: move / middle-slice / centering queue, easing, per-frame state (per-cubie net sign for slices). `MOVE_DURATION=360ms`, `TRANSITION_DURATION=620ms`, `speedFactor`.
+- `src/controls.js` — unified pointer input (drag orbits all views, tap on a tile centres that cell, pinch zoom) + keyboard; builds the cell tiles (`buildCellTiles`) and the 4 twist-button groups around the cube (`buildTurnControls`), shown/hidden by `setControlSet`.
+- `src/icons.js` — twist-button SVG icons, reconstructed in code from 4 hand-crafted base glyphs (full-cube / top / middle / bottom slab — a CCW rotation about the vertical axis) and derived by transform: opposite direction = mirror, other axis = rotate 120°/240° (the iso cube is 3-fold symmetric). Vertical axis = screen-Y. `turnIcon`/`TURN_BUTTONS` (cube rotation, `full`), `faceIcon` (outer `top`/`bottom` slab), `middleIcon` (middle slab). Arrow uses the accent colour; the cube uses `currentColor`.
 - `src/shaders.js` — GLSL. Two-sided lambert (`abs(dot(n,light))`), `u_ambient=0.42`; screen-door (hashed) dither `discard` — keeps each fragment with probability `a_opacity`, for the solid→wireframe dissolve.
 - `scripts/serve.js` — zero-dep static dev server (sets ESM MIME types). `tests/` — Playwright specs. `playwright.config.js`, `eslint.config.js`, `package.json` — infra.
 
@@ -78,11 +87,27 @@ screen x/y/z, plus a depth axis `eF` (the central-cell direction). `project(p) =
 [p·e0, p·e1, p·e2] · depthR(p·eF)`, with `depthR(w)=2.8−1.45w` (w=1→1.35 inner, 0→2.8,
 −1→4.25 outer). This is a Schlegel-style 4D perspective: the central cell is the small
 inner cube, the opposite cell the big enclosing one, the 6 others spread between.
-- **Centering is a 4D rotation of the FRAME**, not the cubies (`rotateFrame`,
-  `centeringPlan`). Cubies hold still in 4D; the viewpoint sweeps inside-out. `main._loop`
-  interpolates `coreFrame` during the animation; `_onCentralComplete` commits it.
+- **Centering is a 4D rotation of the FRAME**, not the cubies. Cubies hold still in 4D;
+  the viewpoint sweeps inside-out. `_render` interpolates `coreFrame` via `slerpFrame`;
+  `_onCentralComplete` commits it.
+- **Stable centering (the key invariant):** every cell has a fixed **canonical frame**
+  `frameForCell(i)`, forced right-handed (det +1) so any cell→cell move is a *proper* SO(4)
+  rotation. Centering interpolates along the **SO(4) geodesic** (`slerpFrame` → `so4Slerp`,
+  a double-quaternion / van Elfrinkhof factorization — smooth at every angle, including the
+  180° opposite-cell hop) and **commits the destination's canonical frame exactly**. So
+  revisiting a cell always lands on the identical orientation (A→B→A is bit-exact) — fixing
+  the old drift where a face other than the cell's came forward. (The old `rotateFrame`/
+  `centeringPlan` single-plane path is retired; don't reintroduce it.)
 - Cubies with <2 nonzero coords are hidden (`isHidden`): the 8 cell-centers + 1 core
   cubie. So **72 cubies render**, not 80.
+
+**Sub-views.** Each of the 8 cell tiles renders with `computeCellCube(cubies, i,
+frameForCell(i), getState)`: only that cell's cubies, with the cell's own axis as depth, so
+its 6 side stickers form the cube faces and the along-axis cells read dark — the same look
+the centred cell has in the main view, in isolation. Sub-views share the **one `viewRot`**
+(synchronized turntable) but never animate centering; they do animate turns (shared
+`getState`), so a twist of the centred cell rigidly spins its own cube while scrambling the
+neighbours'. All 9 views are drawn into scissored viewports of one canvas.
 
 **2. Each cubie is its OWN little Schlegel tesseract** (`cubieBoxes`), *placed* at its
 core position but *shaped* independently (so it doesn't inherit core distortion — it reads
@@ -130,28 +155,55 @@ behind it — no alpha blending, depth buffer untouched. Steady state needs no b
   used to delete a face as it went edge-on, leaving see-through holes between the cubie's
   separate cell boxes. Removing it makes cubies stay solid at grazing angles.
 - `DARK=[0.10,0.10,0.13]` for non-sticker faces; background `[0.04,0.04,0.06]`.
-- **Wireframe toggle** (`W`) — full-wireframe inspection, distinct from the default view's
-  outer shell above: replaces *everything* with wireframe. `computeWireframe` draws each
-  cubie cell as a shrunk
-  cube outline; `computeCoreWireframe` draws the 8 core cells as cube outlines, *always
-  visible*, the active cell spinning during a turn, all rotating during centering. The core
-  cell corners sit exactly on the corner-cubie centers (`CORE_EXT=1`); side cells inset
-  inward, the inside-out outer cell insets **outward** so it encloses its cubies.
+- **Total-wireframe view mode** (menu, or `W` to cycle) — full-wireframe inspection,
+  distinct from the default view's outer shell above: replaces *everything* with wireframe.
+  `computeWireframe` draws each cubie cell as a shrunk cube outline; `computeCoreWireframe`
+  draws the 8 core cells as cube outlines, *always visible*, the active cell spinning during
+  a turn, all rotating during centering. The core cell corners sit exactly on the
+  corner-cubie centers (`CORE_EXT=1`); side cells inset inward, the inside-out outer cell
+  insets **outward** so it encloses its cubies. (Only the **main view** uses wireframe;
+  sub-views are always solid.)
 
 ## View, modes, controls
 
-- **View** is a turntable: independent `viewYaw`/`viewPitch` (recomposed by
-  `_composeViewRot`, pitch clamped to ±90°) so horizontal drag never introduces roll.
-  `viewZoom` sets camera distance (`15/zoom`). View changes never touch puzzle state.
-- **Modes**: Regular (default) and Demo (auto-plays the 48 moves: 8 cells × 6 ×
-  +90°/−90°, canonical order). Speed slider affects both.
-- **Scramble** (button / `S`) is a start/stop loop, not a one-shot: each round does
-  3–7 random side-cell turns on the current centre — only the plane that avoids the
-  depth axis, so never depth-involving — then recenters to a different cell, repeating
-  until stopped. The button toggles its label between `Scramble` and `Stop`.
-- **Keys**: `1–8` central cell · arrows rotate view · `Space` demo play/pause · `R` reset
-  puzzle · `V` reset view · `W` wireframe · `Esc` stop demo · `D` demo · `S` scramble
-  start/stop · `U`/`Shift+U` undo/redo. Mouse drag orbits; wheel / two-finger pinch / ±buttons zoom.
+- **View** is a turntable shared by all 9 views: independent `viewYaw`/`viewPitch`
+  (recomposed by `_composeViewRot`, pitch clamped to ±90°) so horizontal drag never
+  introduces roll. `viewZoom` sets the camera distance (`MAIN_CAM/zoom`) shared by all 9
+  views; sub-views additionally crop-zoom in (`SUBVIEW_ZOOM`) to fill their tile (same
+  perspective as the main view). View changes never touch puzzle state.
+- **Turning**: all moves act on the **centred** cube; to work on another cell, tap its
+  sub-view to centre it first. Buttons sit in **4 groups framing the cube** (Settings →
+  Controls picks which show: `sides` (default) / `central` / `both`):
+  - **bottom** — whole-cube rotation (`turnScreenPlane`): rotate the centred cell, 3 screen
+    axes × 2 = 6.
+  - **top / left / right** — per-axis **layer turns** (screen Y / X / Z), each = 3 slabs ×
+    2 dirs:
+    - outer slabs (`turnFace(kScreen, sSide, dir)`) — turn the **side cell** on that face in
+      the depth-avoiding plane = a normal Rubik's face turn (same family the shuffle uses).
+    - middle slab (`turnMiddle(kScreen, dir)`) — see "Middle slice" below.
+  Every button is a STATIC icon: the canonical frame maps the centred cell's free axes to the
+  same screen x/y/z, so each maps (via `_screenPlaneMove`) to the centred cell's concrete
+  `(planeName, sign)`. `_screenPlaneMove` includes a permutation-parity factor so `dir=+1` is
+  always a right-handed CCW turn about the +screen axis (matching the icon arrow) — without it
+  the Y plane (0,2), being cyclically odd, comes out inverted.
+- **Middle slice** (`turnMiddle` → `executeMiddleMove`): rotate the whole **`fAxis=0`
+  hyper-slab** — every cubie with `pos4[fAxis]=0` (27: the centred cube's middle layer + the
+  adjacent cells' middle slices in that plane), in the slice plane. It's the slab *between*
+  the two side cells ±f, so **top-slab(+f) + middle + bottom-slab(−f), same direction, equal
+  a whole-puzzle reorientation** (solved stays solved) — the key consistency the design
+  requires; the slab-axis cells ±f stay untouched. On the centred cube the faces stay still
+  and the middle ring turns. Like an M/E/S slice it isn't a product of cell turns, but it
+  **is** one of the puzzle's moves (its inverse is too) and the shuffle only uses cell turns,
+  so every reachable state stays solvable. (`middleNetSign` returns 1 for the slab; the
+  per-cubie-sign animation path is shared with normal moves.)
+- **Shuffle** (menu) is a **one-shot**: `SHUFFLE_TURNS` (20) clean side-cell turns on the
+  current centre — only the plane that avoids the depth axis, so never depth-involving —
+  recentering between rounds, run at full speed regardless of the speed slider.
+- **Menu**: Shuffle · Reset (confirm) · Settings (animation speed; Controls = Layer turns /
+  Cube rotation / Both; View mode = Solid `shell-wire` / Wireframe `total-wire`).
+- **Keys** (desktop convenience): `1–8` centre cell · arrows rotate view · `R` reset puzzle
+  · `V` reset view · `W` cycle view mode · `U`/`Shift+U` undo/redo. Pointer drag (anywhere)
+  orbits; tap a sub-view tile to centre it; wheel / two-finger pinch zoom.
 
 ## Invariants to preserve
 
@@ -159,6 +211,8 @@ behind it — no alpha blending, depth buffer untouched. Steady state needs no b
 - Coloring is **sticker-based, 8 cell colors** (not 24 face colors); non-sticker faces dark.
 - Visuals stay minimal: only cubies (+ optional wireframe). No axes/labels/grids in canvas.
 - Cell turn = cubie 4D rotation; centering = frame 4D rotation. Keep these separate.
+- All 9 views share **one** `viewRot`. Centering must commit a **canonical** frame
+  (`frameForCell`), so revisiting a cell is always identical (stable centering).
 
 ## How the model evolved (why it doesn't match a naive reading of the spec)
 
@@ -171,6 +225,12 @@ translucent fills); the constant-size cube look is achieved by each cubie's own 
 projection + the color fade above. If something here seems redundant or odd, it almost certainly fixes
 a specific visual artifact (color snaps, edge bleed, grazing-angle holes, all-black turns)
 — check git history / don't "simplify" it away without reproducing the artifact first.
+
+Most recently the workbench demo became a **mobile-first game**: the desktop top-bar +
+per-cell side panel and the Demo auto-player were dropped; the start/stop scramble loop
+became a one-shot Shuffle; the single projection became 9 synchronized views (main + 8
+cell cubes); and centering was rebuilt on canonical frames + an SO(4) geodesic so it is
+*stable* on revisits. The 4D model, projection, and color fade below were kept intact.
 
 For the reasoning in full — the collision model the color fade is built on, and the
 approaches we tried and rejected (whole-cubie blackout, per-face fade) — see
