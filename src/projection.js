@@ -246,51 +246,46 @@ export function computeCells(cubies, frame, getState = null) {
   return faces;
 }
 
-// Sub-view render: ONE cell drawn as a clean, fully-solid 3×3×3 Rubik's cube. Only
-// that cell's cubies are emitted (the other 7 cells hidden); with `frame` =
-// frameForCell(cellIndex) the cell's own axis is depth, so its side stickers form the
-// 6 cube faces and the along-axis (inner/outer) mini-cells read dark — the same look
-// the centred cell has in the main view, isolated. During a neighbouring cell's turn,
-// cubies that slide in/out of this cell are kept while they're on this cell's 4D side.
-export function computeCellCube(cubies, cellIndex, frame, getState = null) {
-  const { axis, val } = CELLS[cellIndex];
-  const faces = [];
-  cubies.forEach((cubie, i) => {
-    if (isHidden(cubie.pos4)) return;
-    const st = getState ? getState(i) : null;
-    const center4 = st ? st.center4 : cubie.pos4;
-    if (center4[axis] * val <= 0.5) return;   // only cubies on this cell's side
-    const { boxes } = cubieBoxes(
-      cubie, center4, st ? st.orient : cubie.orient, frame, cubie.orient);
-    pushBoxFaces(faces, boxes, 1);            // sub-view cells are always solid
-  });
-  return faces;
-}
+// Sub-views are not a separate projection: a cell shown with `frame = frameForCell(i)`
+// puts the cell's own axis on depth, so only its cubies have a high focused-layer weight
+// (`solidWeight ≈ 1`) — its side stickers become the 6 cube faces and the along-axis
+// mini-cells read dark. So a sub-view is just `computeCells` (solid) or `computeWireframe`
+// (wire) on the sub-frame; cubies sliding out during a neighbour's turn fade via the same
+// `sw`-keyed dither as the main view, instead of popping.
 
 // ── Wireframes (debug / perception) ───────────────────────────────────────────
 
-// Push the 12 edges of an 8-corner box, shrunk toward its centre, as segments.
-function pushBoxEdges(out, C8, color, shrink) {
+// Push the 12 edges of an 8-corner box, shrunk toward its centre, as segments at the
+// given opacity (the renderer screen-door dithers lines just like solid faces, so a
+// wireframe cubie can fade to nothing as it leaves the focused layer).
+function pushBoxEdges(out, C8, color, shrink, opacity = 1) {
   let cx=0,cy=0,cz=0;
   for (const p of C8) { cx+=p[0]; cy+=p[1]; cz+=p[2]; }
   cx/=8; cy/=8; cz/=8;
   const V = C8.map(p => [cx+(p[0]-cx)*shrink, cy+(p[1]-cy)*shrink, cz+(p[2]-cz)*shrink]);
-  for (const [i,j] of BOX_EDGES) out.push({ a: V[i], b: V[j], color });
+  for (const [i,j] of BOX_EDGES) out.push({ a: V[i], b: V[j], color, opacity });
 }
 
 // Wireframe render: every cubie cell as its own (slightly shrunk) cube wireframe,
-// coloured by its sticker cell or as "unused".
-export function computeWireframe(cubies, frame, getState = null, skipSolid = false) {
+// coloured by its sticker cell or as "unused". Options select the role this wireframe
+// plays against the focused-layer weight `sw = solidWeight` (1 = central, 0 = side):
+//   • skipSolid — drop cubies the solid centre fully covers (sw ≥ 0.98), so the side-cell
+//     wireframe only shows where there is no solid on top of it (central solid + side wire).
+//   • fade — opacity = sw, so a wireframe cubie dithers OUT as it slides to the side role
+//     (a central-wireframe whose side appearance is "none", and every sub-view).
+// Without either flag every cubie is drawn opaque — a flat all-wireframe inspection.
+export function computeWireframe(cubies, frame, getState = null, { skipSolid = false, fade = false } = {}) {
   const segs = [];
   cubies.forEach((cubie, i) => {
     if (isHidden(cubie.pos4)) return;
     const st = getState ? getState(i) : null;
     const center4 = st ? st.center4 : cubie.pos4;
-    // In normal mode the central cell is solid, so skip its wireframe; the toggle
-    // mode (skipSolid=false) shows every cubie as wireframe.
-    if (skipSolid && solidWeight(center4, frame) >= 0.98) return;
+    const sw = solidWeight(center4, frame);
+    if (skipSolid && sw >= 0.98) return;        // the solid cube covers this cubie
+    const opacity = fade ? sw : 1;
+    if (opacity <= 0.02) return;
     const { boxes } = cubieBoxes(cubie, center4, st ? st.orient : cubie.orient, frame);
-    for (const bx of boxes) pushBoxEdges(segs, bx.C8, bx.color || WIRE_UNUSED, WIRE_SHRINK);
+    for (const bx of boxes) pushBoxEdges(segs, bx.C8, bx.color || WIRE_UNUSED, WIRE_SHRINK, opacity);
   });
   return segs;
 }

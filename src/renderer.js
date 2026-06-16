@@ -159,7 +159,10 @@ export class Renderer {
       const lb = this.lineBuf;
       const n = [0, 0, 1];
       let p = 0;
-      for (const s of segments) { p = emitVert(lb, p, s.a, n, s.color, 1); p = emitVert(lb, p, s.b, n, s.color, 1); }
+      for (const s of segments) {
+        const op = s.opacity == null ? 1 : s.opacity;   // lines dither too (fade to wireframe/nothing)
+        p = emitVert(lb, p, s.a, n, s.color, op); p = emitVert(lb, p, s.b, n, s.color, op);
+      }
       gl.bindBuffer(gl.ARRAY_BUFFER, this.vbo);
       gl.bufferData(gl.ARRAY_BUFFER, lb.subarray(0, p), gl.DYNAMIC_DRAW);
       this._attr(this.loc.a_pos,     3, stride, 0);

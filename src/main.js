@@ -1,7 +1,7 @@
 import { mat3Mul, mat3AxisRotation, mat3MulVec3 } from './math4d.js';
 import { buildSolvedPuzzle, undoMove, CELLS, serializeCubies, restoreCubies } from './puzzle.js';
 import { readState, writeState, debounce } from './persistence.js';
-import { computeCells, computeCellCube, computeWireframe, computeCoreWireframe,
+import { computeCells, computeWireframe, computeCoreWireframe,
          frameForCell, cloneFrame, slerpFrame, centralFromFrame } from './projection.js';
 import { Renderer } from './renderer.js';
 import { AnimationEngine } from './animation.js';
@@ -17,7 +17,11 @@ const SUBVIEW_ZOOM = 2.4;                     // sub-views share the main camera
 const SHUFFLE_TURNS = 20;                      // moves per Shuffle
 const SHUFFLE_SPEED = 2.0;                     // Shuffle always runs at full speed
 const SAVE_DEBOUNCE = 500;                     // ms to coalesce persistence writes
-const VIEW_MODES    = ['shell-wire', 'total-wire'];
+// View presentation = three independent settings (see _render). The central layer draws
+// solid or as wireframe; the side cells draw as wireframe or not at all; the core-tesseract
+// wireframe is a separate overlay. (The old single shell-wire/total-wire mode is migrated.)
+const CENTRAL_MODES = ['solid', 'wire'];
+const SIDE_MODES    = ['wire', 'none'];
 const CONTROL_SETS  = ['central', 'sides', 'both', 'none'];   // 'none' = zen mode (no buttons)
 
 // Direct-manipulation swipe (turn the centred cube by dragging across its stickers).
@@ -45,7 +49,13 @@ class App {
     this.coreFrame = frameForCell(this.centralCellIndex);    // explicit 4D core orientation
     this.subFrames = CELLS.map((_, i) => frameForCell(i));   // fixed canonical frame per sub-view
     this.pendingCenter = null;                 // active centering { fromFrame, toFrame, toCi }
-    this.viewMode = VIEW_MODES.includes(saved?.viewMode) ? saved.viewMode : 'shell-wire';
+    // Three independent presentation settings, defaulting to the old shell-wire look
+    // (solid centre, wireframe sides, no core overlay). A legacy total-wire save migrates
+    // to the all-wireframe-plus-core equivalent.
+    const legacyTotal = saved?.centralMode == null && saved?.viewMode === 'total-wire';
+    this.centralMode = CENTRAL_MODES.includes(saved?.centralMode) ? saved.centralMode : (legacyTotal ? 'wire' : 'solid');
+    this.sideMode    = SIDE_MODES.includes(saved?.sideMode) ? saved.sideMode : 'wire';
+    this.coreWire    = typeof saved?.coreWire === 'boolean' ? saved.coreWire : legacyTotal;
     this.controlSet = CONTROL_SETS.includes(saved?.controlSet) ? saved.controlSet : 'central';
 
     // Turntable view: independent yaw/pitch so horizontal drag never leaks into roll.
@@ -125,17 +135,24 @@ class App {
     }
     const getState = frame && frame.type === 'move' ? frame.getState : null;
 
-    // Main view geometry.
-    let cells, segments;
-    if (this.viewMode === 'total-wire') {
-      cells = [];
+    // Main view geometry, from the three presentation settings. The focused (central)
+    // layer is solid faces or wireframe edges; the side cells are wireframe edges or
+    // nothing; the dither carries every central→side hand-off (see computeWireframe):
+    //   solid centre        → side wire : solid fades out over a full side wireframe
+    //   solid centre        → side none : solid fades out into nothing
+    //   wireframe centre     → side wire : edges at full opacity throughout — no transition
+    //   wireframe centre     → side none : edges fade out into nothing
+    const centralWire = this.centralMode === 'wire';
+    const sideWire = this.sideMode === 'wire';
+    const cells = centralWire ? [] : computeCells(this.cubies, coreFrame, getState);
+    let segments = [];
+    if (centralWire && sideWire) segments = computeWireframe(this.cubies, coreFrame, getState);
+    else if (centralWire)        segments = computeWireframe(this.cubies, coreFrame, getState, { fade: true });
+    else if (sideWire)           segments = computeWireframe(this.cubies, coreFrame, getState, { skipSolid: true });
+    if (this.coreWire) {
       const spinCell = frame && frame.type === 'move' ? frame.cellIndex : -1;
       const spinR    = frame && frame.type === 'move' ? frame.R : null;
-      segments = computeWireframe(this.cubies, coreFrame, getState)
-        .concat(computeCoreWireframe(coreFrame, [0, 1, 2, 3, 4, 5, 6, 7], spinCell, spinR));
-    } else {
-      cells = computeCells(this.cubies, coreFrame, getState);
-      segments = computeWireframe(this.cubies, coreFrame, getState, true);
+      segments = segments.concat(computeCoreWireframe(coreFrame, [0, 1, 2, 3, 4, 5, 6, 7], spinCell, spinR));
     }
 
     const r = this.renderer;
@@ -147,11 +164,19 @@ class App {
     // Main tesseract view.
     const camDist = MAIN_CAM / this.viewZoom;
     r.drawView(cells, this.viewRot, segments, camDist, rectOf(this.stageEl));
-    // 8 cell sub-views — each cell as a solid Rubik's cube, sharing the same viewRot AND the
-    // same camera distance as the main view (so identical perspective), cropped to fill the tile.
+    // 8 cell sub-views — each cell rendered on its own canonical frame (so only its cubies
+    // have weight), sharing the same viewRot AND camera distance as the main view (identical
+    // perspective), cropped to fill the tile. A sub-view is "central, side = none": it follows
+    // the central-cell mode (solid or wireframe) and a cubie sliding out during a neighbour's
+    // turn fades to nothing via the same dither.
     for (let i = 0; i < 8; i++) {
-      const sub = computeCellCube(this.cubies, i, this.subFrames[i], getState);
-      r.drawView(sub, this.viewRot, null, camDist, rectOf(this.tileEls[i]), SUBVIEW_ZOOM);
+      if (centralWire) {
+        const seg = computeWireframe(this.cubies, this.subFrames[i], getState, { fade: true });
+        r.drawView([], this.viewRot, seg, camDist, rectOf(this.tileEls[i]), SUBVIEW_ZOOM);
+      } else {
+        const sub = computeCells(this.cubies, this.subFrames[i], getState);
+        r.drawView(sub, this.viewRot, null, camDist, rectOf(this.tileEls[i]), SUBVIEW_ZOOM);
+      }
     }
   }
 
@@ -485,19 +510,38 @@ class App {
     return actions;
   }
 
-  // ── View mode ────────────────────────────────────────────────────────────────
+  // ── Presentation settings (central / side / core) ─────────────────────────────
 
-  setViewMode(mode) {
-    if (mode === 'semi') return;               // placeholder, disabled
-    this.viewMode = mode;
-    const radio = document.querySelector(`input[name="viewmode"][value="${mode}"]`);
+  setCentralMode(mode) {
+    if (!CENTRAL_MODES.includes(mode)) return;
+    this.centralMode = mode;
+    const radio = document.querySelector(`input[name="centralmode"][value="${mode}"]`);
     if (radio) radio.checked = true;
     this._scheduleSave?.();
     this.markDirty();
   }
 
+  setSideMode(mode) {
+    if (!SIDE_MODES.includes(mode)) return;
+    this.sideMode = mode;
+    const radio = document.querySelector(`input[name="sidemode"][value="${mode}"]`);
+    if (radio) radio.checked = true;
+    this._scheduleSave?.();
+    this.markDirty();
+  }
+
+  setCoreWire(on) {
+    this.coreWire = !!on;
+    const box = document.getElementById('core-wire-toggle');
+    if (box) box.checked = this.coreWire;
+    this._scheduleSave?.();
+    this.markDirty();
+  }
+
+  // Keyboard W toggles the central layer between solid and wireframe — the primary
+  // visual switch (side/core stay where the menu left them).
   cycleViewMode() {
-    this.setViewMode(this.viewMode === 'shell-wire' ? 'total-wire' : 'shell-wire');
+    this.setCentralMode(this.centralMode === 'solid' ? 'wire' : 'solid');
   }
 
   setControlSet(set) {
@@ -515,22 +559,27 @@ class App {
     return {
       cubies: serializeCubies(this.cubies),
       central: this.centralCellIndex,
-      viewMode: this.viewMode,
+      centralMode: this.centralMode,
+      sideMode: this.sideMode,
+      coreWire: this.coreWire,
       controlSet: this.controlSet,
       speed: parseInt(document.getElementById('speed-slider').value),
     };
   }
 
   // Reflect restored settings into the menu controls (and the animation speed). The puzzle,
-  // central cell, view mode and control set were already applied in the constructor; this
-  // only syncs the on-screen inputs and the speed factor.
+  // central cell, presentation settings and control set were already applied in the
+  // constructor; this only syncs the on-screen inputs and the speed factor.
   _restoreSettingsUI(saved) {
     const setRadio = (name, value) => {
       const r = document.querySelector(`input[name="${name}"][value="${value}"]`);
       if (r) r.checked = true;
     };
-    setRadio('viewmode', this.viewMode);
+    setRadio('centralmode', this.centralMode);
+    setRadio('sidemode', this.sideMode);
     setRadio('controlset', this.controlSet);
+    const coreBox = document.getElementById('core-wire-toggle');
+    if (coreBox) coreBox.checked = this.coreWire;
 
     const slider = document.getElementById('speed-slider');
     const speed = saved?.speed;
@@ -581,9 +630,14 @@ class App {
       this.anim.speedFactor = parseInt(e.target.value) / 5;   // 5 = 1×
       this._scheduleSave?.();
     });
-    for (const radio of document.querySelectorAll('input[name="viewmode"]')) {
-      radio.addEventListener('change', e => { if (e.target.checked) this.setViewMode(e.target.value); });
+    for (const radio of document.querySelectorAll('input[name="centralmode"]')) {
+      radio.addEventListener('change', e => { if (e.target.checked) this.setCentralMode(e.target.value); });
     }
+    for (const radio of document.querySelectorAll('input[name="sidemode"]')) {
+      radio.addEventListener('change', e => { if (e.target.checked) this.setSideMode(e.target.value); });
+    }
+    document.getElementById('core-wire-toggle')
+      .addEventListener('change', e => this.setCoreWire(e.target.checked));
     for (const radio of document.querySelectorAll('input[name="controlset"]')) {
       radio.addEventListener('change', e => { if (e.target.checked) this.setControlSet(e.target.value); });
     }

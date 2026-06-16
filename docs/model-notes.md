@@ -201,14 +201,16 @@ The single projection became a **mobile-first game** of 9 synchronized views —
 tesseract plus 8 cell sub-views, all sharing one turntable `viewRot`. Two notes for a
 future session, because both look arbitrary out of context.
 
-**Sub-views (`computeCellCube`).** A cell shown "as if central" with *only its own cubies*
-is already a clean 3×3×3 Rubik's cube — that falls straight out of the existing model: with
-`frame = frameForCell(i)` the cell's 27 cubies sit at depth +1 (the inner cube), their
-along-axis (inner/outer) mini-cells read dark, and the 6 side stickers become the cube
-faces. So a sub-view is just `computeCells` restricted to that cell, forced solid. During a
-neighbouring cell's turn, cubies slide in/out of the cell; we keep a cubie while it's on the
-cell's 4D side (`center4·axis·val > 0.5`) so it animates to/from the boundary instead of
-popping. No new projection — the sub-view *is* the main view's central look, isolated.
+**Sub-views.** A cell shown "as if central" with *only its own cubies* is already a clean
+3×3×3 Rubik's cube — that falls straight out of the existing model: with `frame =
+frameForCell(i)` the cell's 27 cubies sit at depth +1 (the inner cube), so only they have a
+high focused-layer weight (`solidWeight ≈ 1`), their along-axis (inner/outer) mini-cells read
+dark, and the 6 side stickers become the cube faces. So a sub-view is literally the main view's
+`computeCells` (or `computeWireframe`, following the Central-cell mode) on the sub-frame — no
+separate `computeCellCube`. During a neighbouring cell's turn, cubies slide in/out of the cell;
+because the sub-view is "central, side = none", a leaving cubie's `sw` falls to 0 and it **dithers
+out into nothing** via the same screen-door dissolve as the main view, instead of popping. No new
+projection — the sub-view *is* the main view's central look, isolated.
 
 **Stable centering (canonical frames + SO(4) geodesic).** The old centering composed a
 single-plane `rotateFrame` and committed the *composed* frame, so the free axes drifted:

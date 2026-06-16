@@ -219,7 +219,7 @@ button:disabled { opacity: 0.4; cursor: default; }
 /* explicit height/margin so the control can't be re-measured (and resize the panel)
    on first interaction in some engines */
 input[type="range"] { accent-color: var(--accent); width: 100%; display: block; height: 18px; margin: 0; }
-input[type="radio"] { accent-color: var(--accent); }
+input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 
 #confirm-panel p { line-height: 1.45; }
 .confirm-actions { display: flex; gap: 10px; justify-content: flex-end; }

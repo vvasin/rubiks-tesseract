@@ -51,9 +51,11 @@ test('survives turns, shuffle, recenter, and view modes without errors', async (
     a.shuffle();                await settled();  // one-shot shuffle (20 turns, full speed)
     a.selectCentralCell(5);     await settled();  // recentering
     a.selectCentralCell(0);     await settled();
-    a.setViewMode('total-wire');
-    a.executeMove(4, 'XY', +1); await settled();  // turn in total-wireframe mode
-    a.setViewMode('shell-wire');
+    a.setCentralMode('wire'); a.setCoreWire(true);
+    a.executeMove(4, 'XY', +1); await settled();  // turn in all-wireframe + core mode
+    a.setSideMode('none');
+    a.executeMove(4, 'XY', -1); await settled();  // turn with side cells hidden
+    a.setCentralMode('solid'); a.setSideMode('wire'); a.setCoreWire(false);
     a.resetPuzzle();
   });
   await page.waitForTimeout(200);
@@ -91,7 +93,9 @@ test('persists puzzle, central cell, and settings across a reload', async ({ pag
     a.executeMove(2, 'XW', +1); await settled();
     a.executeMove(0, 'YZ', -1); await settled();
     a.selectCentralCell(5);     await settled();
-    a.setViewMode('total-wire');
+    a.setCentralMode('wire');
+    a.setSideMode('none');
+    a.setCoreWire(true);
     a.setControlSet('both');
     document.getElementById('speed-slider').value = 8;
     document.getElementById('speed-slider').dispatchEvent(new Event('input'));
@@ -99,7 +103,9 @@ test('persists puzzle, central cell, and settings across a reload', async ({ pag
     return {
       cubies: JSON.stringify(a.cubies.map(c => Array.from(c.pos4))),
       central: a.centralCellIndex,
-      viewMode: a.viewMode,
+      centralMode: a.centralMode,
+      sideMode: a.sideMode,
+      coreWire: a.coreWire,
       controlSet: a.controlSet,
       speed: parseInt(document.getElementById('speed-slider').value),
     };
@@ -114,7 +120,9 @@ test('persists puzzle, central cell, and settings across a reload', async ({ pag
     return {
       cubies: JSON.stringify(a.cubies.map(c => Array.from(c.pos4))),
       central: a.centralCellIndex,
-      viewMode: a.viewMode,
+      centralMode: a.centralMode,
+      sideMode: a.sideMode,
+      coreWire: a.coreWire,
       controlSet: a.controlSet,
       speed: parseInt(document.getElementById('speed-slider').value),
       speedFactor: a.anim.speedFactor,
@@ -123,7 +131,9 @@ test('persists puzzle, central cell, and settings across a reload', async ({ pag
 
   expect(after.cubies).toBe(before.cubies);
   expect(after.central).toBe(before.central);
-  expect(after.viewMode).toBe(before.viewMode);
+  expect(after.centralMode).toBe(before.centralMode);
+  expect(after.sideMode).toBe(before.sideMode);
+  expect(after.coreWire).toBe(before.coreWire);
   expect(after.controlSet).toBe(before.controlSet);
   expect(after.speed).toBe(before.speed);
   expect(after.speedFactor).toBeCloseTo(before.speed / 5);
@@ -257,7 +267,7 @@ test('captures reference screenshots', async ({ page }) => {
   await mkdir(SHOTS, { recursive: true });
   const canvas = page.locator('#glcanvas');
   await writeFile(`${SHOTS}/idle.png`, await canvas.screenshot());
-  await page.evaluate(() => window.__app.setViewMode('total-wire'));
+  await page.evaluate(() => { window.__app.setCentralMode('wire'); window.__app.setCoreWire(true); });
   await page.waitForTimeout(200);
   await writeFile(`${SHOTS}/wireframe.png`, await canvas.screenshot());
 });

@@ -40,7 +40,9 @@ a.centralStickers();                // the ≤27 swipe hit-areas (client-px quad
 a.applyCentralSwipe(start, x, y);   // turn the layer a swipe from sticker `start` exits toward (x,y)
 a.selectCentralCell(4);             // animated, stable recentering
 a.shuffle();                        // one-shot scramble (SHUFFLE_TURNS moves, full speed)
-a.setViewMode('total-wire');        // 'shell-wire' | 'total-wire'
+a.setCentralMode('wire');           // focused layer: 'solid' | 'wire'
+a.setSideMode('none');              // side cells: 'wire' | 'none'
+a.setCoreWire(true);               // core-tesseract wireframe overlay on/off
 a.coreFrame;                        // current 4D frame {e:[e0,e1,e2], eF} — at rest, a canonical frame
 ```
 To capture a specific moment in a turn, poll `a.anim.active` and compute progress from
@@ -53,7 +55,7 @@ canvas uses `preserveDrawingBuffer`, so it can be read back via a 2D canvas in t
 - `src/main.js` — `App`: state, **9-view render loop** (`_loop`/`_render`, dirty-flag redraw), view (yaw/pitch/zoom), stable centering, screen-plane→move dispatch (`turnScreenPlane`/`turnFace`/`turnMiddle`, against a view-following `_buttonFrame` for buttons), direct **swipe-to-turn** (`centralStickers`/`applyCentralSwipe`), shuffle, menu/view-mode wiring, **session persistence** (`_serialize`/`_restoreSettingsUI` + a debounced `_scheduleSave`). Bootstraps `window.__app`.
 - `src/math4d.js` — 4×4 / 3×3 matrix + 4D vector helpers (`mat4PlaneRotation`, `mat4MulVec4`, `PLANE_AXES`, …) **+ the SO(4) geodesic** (`so4Slerp`, `so4Decompose`, `mat4Det`, `mat4FromCols`) used by stable centering.
 - `src/puzzle.js` — cubie model, `CELLS` (the 8 cells + colors), `executeMove`/`undoMove`, the middle-slice (`executeMiddleMove`/`middleNetSign`), and persistence (de)serialization of the mutable cubie fields (`serializeCubies`/`restoreCubies`).
-- `src/projection.js` — **the heart**: 4D→3D projection, cubie geometry, color fade, wireframes, canonical frames + `slerpFrame`, and `computeCellCube` (one cell as a solid cube, for sub-views). Almost all design decisions live here.
+- `src/projection.js` — **the heart**: 4D→3D projection, cubie geometry, color fade, wireframes (solid `computeCells` / wireframe `computeWireframe`, both keyed off the focused-layer weight `solidWeight` so they double as sub-views on a cell's own frame), canonical frames + `slerpFrame`, and the core-tesseract wireframe (`computeCoreWireframe`). Almost all design decisions live here.
 - `src/renderer.js` — WebGL: opaque, depth-tested, **no back-face culling**. `beginFrame()` clears the whole canvas; `drawView(cells, viewRot, segments, camDist, rect, zoom)` renders one scissored viewport (`zoom` crops/magnifies without moving the camera) — called once per view.
 - `src/animation.js` — `AnimationEngine`: move / middle-slice / centering queue, easing, per-frame state (per-cubie net sign for slices). `MOVE_DURATION=360ms`, `TRANSITION_DURATION=620ms`, `speedFactor`.
 - `src/controls.js` — unified pointer input: a drag that starts on a centred-cube sticker is a **layer swipe** (resolved via `App.centralStickers`/`applyCentralSwipe`) and never orbits; a drag that starts on the background or a cell tile orbits all views; tap a tile to centre that cell; pinch zoom. Plus keyboard; builds the cell tiles (`buildCellTiles`) and the 4 twist-button groups around the cube (`buildTurnControls`), shown/hidden by `setControlSet`.
@@ -105,13 +107,16 @@ inner cube, the opposite cell the big enclosing one, the 6 others spread between
 - Cubies with <2 nonzero coords are hidden (`isHidden`): the 8 cell-centers + 1 core
   cubie. So **72 cubies render**, not 80.
 
-**Sub-views.** Each of the 8 cell tiles renders with `computeCellCube(cubies, i,
-frameForCell(i), getState)`: only that cell's cubies, with the cell's own axis as depth, so
-its 6 side stickers form the cube faces and the along-axis cells read dark — the same look
-the centred cell has in the main view, in isolation. Sub-views share the **one `viewRot`**
-(synchronized turntable) but never animate centering; they do animate turns (shared
-`getState`), so a twist of the centred cell rigidly spins its own cube while scrambling the
-neighbours'. All 9 views are drawn into scissored viewports of one canvas.
+**Sub-views.** Each of the 8 cell tiles renders the **same** `computeCells` / `computeWireframe`
+as the main view, just on that cell's own canonical frame (`frameForCell(i)`): with the cell's
+axis as depth only its cubies have a high focused-layer weight, so its 6 side stickers form the
+cube faces and the along-axis cells read dark — the centred-cell look, isolated. A sub-view is
+effectively "central, side = none": it follows the **Central cell** mode (solid or wireframe),
+and a cubie sliding out during a neighbour's turn **fades to nothing via the same dither** as
+the main view instead of popping. Sub-views share the **one `viewRot`** (synchronized turntable)
+but never animate centering; they do animate turns (shared `getState`), so a twist of the centred
+cell rigidly spins its own cube while scrambling the neighbours'. All 9 views are drawn into
+scissored viewports of one canvas.
 
 **2. Each cubie is its OWN little Schlegel tesseract** (`cubieBoxes`), *placed* at its
 core position but *shaped* independently (so it doesn't inherit core distortion — it reads
@@ -139,19 +144,38 @@ swap hands off black-to-black, *without* ever blacking the whole puzzle:
   crossover. The trade (accepted): the moving cell vs *stationary side* collisions still
   snap, but the puzzle is never all-black. Centering uses the symmetric settled fade.
 
-### Solid centre, wireframe shell (the default view)
+### Presentation: focused layer vs side cells (three independent settings)
 
-In normal (non-toggle) mode the **central cell renders solid; the 7 outer-layer cells
-render as wireframe** — the focused 3×3×3 reads as a clean Rubik's cube while the rest of
-the tesseract is see-through structure, not a wall of cubes. Per cubie,
-`solidWeight = smoothstep(0.4, 0.9, pos4·eF)` (1 = central layer, →0 outward); it slides
-continuously as the frame sweeps (centering) or a cubie crosses the layer (a turn whose
-plane includes the central axis). `computeCells` skips `sw≤0.02` cubies and tags faces
-with `opacity=sw`; `computeWireframe(…, skipSolid=true)` skips the solid (`sw≥0.98`) ones.
-The handoff is a **screen-door dither dissolve**: the shader keeps each fragment with
-probability `sw`, so a transitioning cubie's solid sprouts holes that reveal the wireframe
-behind it — no alpha blending, depth buffer untouched. Steady state needs no blending
-(every cubie is cleanly solid or wireframe).
+How the tesseract reads is **three independent menu settings**, all hung off one quantity —
+the focused-layer weight `solidWeight = smoothstep(0.4, 0.9, pos4·eF)` (1 = central layer,
+→0 outward), which slides continuously as the frame sweeps (centering) or a cubie crosses the
+layer (a turn whose plane includes the central axis):
+
+- **Central cell** = `solid` (default) or `wire` — how the `sw≈1` cubies draw.
+- **Side cells** = `wire` (default) or `none` — how the `sw≈0` cubies draw (`none` hides them).
+- **Core tesseract** wireframe = on/off — the separate `computeCoreWireframe` overlay (default off).
+
+The defaults (solid centre, wireframe sides, no core) are the old "Solid" look: the focused
+3×3×3 reads as a clean Rubik's cube while the rest is see-through structure, not a wall of cubes.
+`computeCells` skips `sw≤0.02` cubies and tags faces with `opacity=sw`; `computeWireframe` takes
+options — `skipSolid` drops the cubies the solid centre fully covers (`sw≥0.98`), and `fade`
+sets `opacity=sw` so a *wireframe* cubie can dissolve out too.
+
+Every **central→side hand-off is carried by the screen-door dither** (the shader keeps each
+fragment — face *or* line — with probability `opacity`, no alpha blending, depth buffer
+untouched):
+
+| central → side | how it transitions |
+|---|---|
+| solid → wire | solid faces dither out over a full-opacity side wireframe *(the classic shell)* |
+| solid → none | solid faces dither out **into nothing** |
+| wire → wire | edges stay at full opacity throughout — **no** transition |
+| wire → none | edges dither out **into nothing** (`fade`) |
+
+Each main-view combo picks the right `computeWireframe` call (see `_render`). **Sub-views reuse
+this exactly** on the cell's own frame as "central, side = none", so a cubie leaving the cell
+fades instead of popping. Steady state needs no blending (every cubie is cleanly solid, wireframe,
+or absent).
 
 ### Other rendering facts
 
@@ -159,14 +183,13 @@ behind it — no alpha blending, depth buffer untouched. Steady state needs no b
   used to delete a face as it went edge-on, leaving see-through holes between the cubie's
   separate cell boxes. Removing it makes cubies stay solid at grazing angles.
 - `DARK=[0.10,0.10,0.13]` for non-sticker faces; background `[0.04,0.04,0.06]`.
-- **Total-wireframe view mode** (menu, or `W` to cycle) — full-wireframe inspection,
-  distinct from the default view's outer shell above: replaces *everything* with wireframe.
-  `computeWireframe` draws each cubie cell as a shrunk cube outline; `computeCoreWireframe`
-  draws the 8 core cells as cube outlines, *always visible*, the active cell spinning during
-  a turn, all rotating during centering. The core cell corners sit exactly on the
-  corner-cubie centers (`CORE_EXT=1`); side cells inset inward, the inside-out outer cell
-  insets **outward** so it encloses its cubies. (Only the **main view** uses wireframe;
-  sub-views are always solid.)
+- **Core-tesseract wireframe** (the *Core tesseract* checkbox; `W` toggles the Central cell
+  mode solid↔wire) — `computeCoreWireframe` draws the 8 core cells as cube outlines, the active
+  cell spinning during a turn, all rotating during centering. The core cell corners sit exactly
+  on the corner-cubie centers (`CORE_EXT=1`); side cells inset inward, the inside-out outer cell
+  insets **outward** so it encloses its cubies. It's an independent overlay now, so a full
+  wireframe inspection = Central `wire` + Side `wire` + Core on. (Only the **main view** shows
+  the core overlay; sub-views never do.)
 
 ## View, modes, controls
 
@@ -230,9 +253,10 @@ behind it — no alpha blending, depth buffer untouched. Steady state needs no b
   current centre — only the plane that avoids the depth axis, so never depth-involving —
   recentering between rounds, run at full speed regardless of the speed slider.
 - **Menu**: Shuffle · Reset (confirm) · Settings (animation speed; Controls = Cube rotation
-  (default) / Layer turns / Both / None; View mode = Solid `shell-wire` / Wireframe `total-wire`).
+  (default) / Layer turns / Both / None; Central cell = Solid (default) / Wireframe; Side cells
+  = Wireframe (default) / None; Core tesseract wireframe checkbox (default off)).
 - **Keys** (desktop convenience): `1–8` centre cell · arrows rotate view · `R` reset puzzle
-  · `V` reset view · `W` cycle view mode · `U`/`Shift+U` undo/redo. Pointer drag on the
+  · `V` reset view · `W` toggle Central cell solid↔wireframe · `U`/`Shift+U` undo/redo. Pointer drag on the
   centred cube swipes a layer (above); drag on the background/tiles orbits; tap a sub-view
   tile to centre it; wheel / two-finger pinch zoom.
 
@@ -242,7 +266,9 @@ The session survives a refresh / reopened tab via `localStorage` (key
 `rubiks-tesseract/state/v1`). What's saved: the **puzzle** (only the mutable cubie fields —
 `pos4`, `faceDirs`, `orient`; the solved scaffold is rebuilt by `buildSolvedPuzzle` in the
 same deterministic order, so `restoreCubies` just overwrites those three per cubie), the
-**central cell index**, and the **settings** (speed-slider value, control set, view mode).
+**central cell index**, and the **settings** (speed-slider value, control set, the three
+presentation settings — central mode, side mode, core-wireframe flag). A legacy saved
+`viewMode` (`total-wire`) migrates to the equivalent triplet on load.
 
 - **Central cell is stored as an index, not a frame.** On load `coreFrame = frameForCell(central)`
   — the canonical frame — so restore lands on the exact stable orientation the centering

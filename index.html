@@ -60,11 +60,25 @@
             None</label>
         </div>
 
-        <div class="setting radio-list view-modes">
-          <span class="legend">View mode</span>
-          <label><input type="radio" name="viewmode" value="shell-wire" checked>
+        <div class="setting radio-list">
+          <span class="legend">Central cell</span>
+          <label><input type="radio" name="centralmode" value="solid" checked>
             Solid</label>
-          <label><input type="radio" name="viewmode" value="total-wire">
+          <label><input type="radio" name="centralmode" value="wire">
+            Wireframe</label>
+        </div>
+
+        <div class="setting radio-list">
+          <span class="legend">Side cells</span>
+          <label><input type="radio" name="sidemode" value="wire" checked>
+            Wireframe</label>
+          <label><input type="radio" name="sidemode" value="none">
+            None</label>
+        </div>
+
+        <div class="setting radio-list">
+          <span class="legend">Core tesseract</span>
+          <label><input type="checkbox" id="core-wire-toggle">
             Wireframe</label>
         </div>
       </section>
