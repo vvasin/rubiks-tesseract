@@ -41,8 +41,10 @@ a.applyCentralSwipe(start, x, y);   // turn the layer a swipe from sticker `star
 a.selectCentralCell(4);             // animated, stable recentering
 a.shuffle();                        // one-shot scramble (SHUFFLE_TURNS moves, full speed)
 a.setCentralMode('wire');           // focused layer: 'solid' | 'wire'
-a.setSideMode('none');              // side cells: 'semi' | 'wire' | 'none'
+a.setSideMode('none');              // side cells: 'semi' | 'solid' | 'wire' | 'none'
 a.setCoreWire(true);               // core-tesseract wireframe overlay on/off
+a.setClassic(true);                // classic ('exploded cells', MC4D-style) view on/off
+a.classicT;                        // animated 0→1 classic transition weight
 a.coreFrame;                        // current 4D frame {e:[e0,e1,e2], eF} — at rest, a canonical frame
 ```
 To capture a specific moment in a turn, poll `a.anim.active` and compute progress from
@@ -152,10 +154,14 @@ the focused-layer weight `solidWeight = smoothstep(0.4, 0.9, pos4·eF)` (1 = cen
 layer (a turn whose plane includes the central axis):
 
 - **Central cell** = `solid` (default) or `wire` — how the `sw≈1` cubies draw.
-- **Side cells** = `semi` (default) / `wire` / `none` — how the `sw≈0` cubies draw. `semi` draws them
-  as **translucent solids** (the whole tesseract reads as nested frosted cubes); `wire` as edges;
-  `none` hides them.
+- **Side cells** = `semi` (default) / `solid` / `wire` / `none` — how the `sw≈0` cubies draw. `semi`
+  draws them as **translucent solids** (the whole tesseract reads as nested frosted cubes); `solid`
+  draws them **fully opaque** (`SIDE_FLOOR.solid=1.0` — the floor path with α=1; needed for the
+  authentic classic view); `wire` as edges; `none` hides them.
 - **Core tesseract** wireframe = on/off — the separate `computeCoreWireframe` overlay (default off).
+
+A fourth, **independent** toggle — **Classic view** (the *Display* group + the corner button) — is
+documented in its own section below; it rearranges geometry rather than picking a draw style.
 
 The default (solid centre, semitransparent sides, no core) shows the focused 3×3×3 as a clean
 opaque Rubik's cube with the rest of the tesseract as see-through frosted cubes around it (`wire`
@@ -184,6 +190,47 @@ Each main-view combo picks the right `computeWireframe` call (see `_render`). **
 this exactly** on the cell's own frame as "central, side = none", so a cubie leaving the cell
 fades instead of popping. Steady state needs no blending (every cubie is cleanly solid, wireframe,
 or absent).
+
+### Classic ("exploded cells") view — `classicT`, an independent geometry toggle
+
+A separate toggle (Settings → *Display* → **Classic view**, and the corner button; `App.setClassic`,
+persisted) shows the tesseract as a **set of grouped stickers**, à la Magic Cube 4D. It's animated by
+`classicT ∈ [0,1]` (App-owned tween, `CLASSIC_DURATION=620ms`÷speed, eased — *not* an `AnimationEngine`
+job; `_tickClassic` runs in `_loop` and keeps the loop "busy"). Every compute call takes a `classic`
+arg — `{ t, mode }` with `mode` `'main'` (the big view) or `'sub'` (cell tiles) — handled in
+`cubieBoxes`/`pushBoxFaces`/`computeWireframe`:
+
+- **Sub-views** (`mode:'sub'`): keep **only each cubie's inner cell** (`df≈+1`), dither the side/outer
+  cells away — so a tile becomes that cell's own flat 3×3 sticker grid (`classicHide` = `1−innerWeight(df)`).
+- **Main view** (`mode:'main'`): drop every **unused** cell and every **outer** cell (`df≈−1`, i.e. the
+  big enclosing/opposite cube; `classicHide` = `smoothstep(0.2,0.85,−df)`); keep the inner cell (central
+  small cube) and rearrange the side cells (`df≈0`, weighted `sideW`, animated by `classicT`),
+  size/shape preserved, into tight **core-tesseract side-cell frustums** — two steps in `cubieBoxes`:
+  - **pull out** — translate along the cell's facing free-direction by `PULL_DIST = depthR(0)−depthR(1)
+    = 1.45` (one depth level; `depthR` is linear so layers are equal-spaced). Inner-layer side cells
+    land at the middle layer's level, middle at the outer's.
+  - **group** (opt-in — *Group side cells*, `groupSides`, default on; its own `groupT` tween so toggling
+    it slides) — compact the two in-face (tangential) axes onto a uniform `PULL_DIST` grid (`g·PULL_DIST`
+    target, the centre column `g=0` stays put), so each cell reads as one cluster instead of a spread —
+    corners move diagonally, edges horizontally/vertically, the same step distance as the pull-out. Each
+    screen axis is weighted by how perpendicular it is to the facing dir (`1 − f̂ₖ²`), **not** an argmax
+    pick — otherwise the radial/tangential split flips when the dominant axis crosses over mid-recentre
+    (e.g. +X→+Y) and the stickers visibly snap between clusters.
+
+These are **render-time offsets on the cell boxes only** — the cubies (their 4D state and projected
+centres) never move; the clusters rotate with the core frame during centering because the offsets are
+recomputed in the live frame each tick.
+- The **depth blackening is disabled** (`classicColorWeight` lerps `colorWeight`→1): every shown sticker
+  reads full colour. The transition uses the **same screen-door dither** (unused/outer cells dissolve;
+  side cells morph out). Classic composes with the side mode (opacity/style) — the **authentic** look is
+  Side cells = `solid`; with `semi` the frustums are translucent. The central swipe model is unchanged
+  (the central cube stays at `depthR(1)`).
+- **Outer cell** (*Classic view* group → *Outer cell*; `keepOuter`, default off, main view only). Off:
+  the outer core cell (big enclosing cube) is dropped — and `classicColorWeight` keeps it at its normal
+  **black** weight while it dithers out, so it doesn't flash its colour mid-transition. On: it isn't
+  hidden (`classicHide`→1) and is painted to full colour, so the enclosing cube stays visible. Both
+  *Outer cell* and *Group side cells* live in a *Classic view* settings group, disabled while classic
+  mode is off (`_updateClassicControls`).
 
 ### Other rendering facts
 
@@ -260,9 +307,17 @@ or absent).
 - **Shuffle** (menu) is a **one-shot**: `SHUFFLE_TURNS` (20) clean side-cell turns on the
   current centre — only the plane that avoids the depth axis, so never depth-involving —
   recentering between rounds, run at full speed regardless of the speed slider.
-- **Menu**: Shuffle · Reset (confirm) · Settings (animation speed; Controls = Cube rotation
-  (default) / Layer turns / Both / None; Central cell = Solid (default) / Wireframe; Side cells
-  = Semitransparent (default) / Wireframe / None; Core tesseract wireframe checkbox (default off)).
+- **Menu**: a scrollable body (`.menu-body`, header pinned) — **Shuffle + Reset (danger)** side by
+  side (`.menu-actions`, equal width) · Settings (animation speed slider, 9 odd steps so default
+  *medium* sits dead-centre; the multi-value groups lay options in two equal flex columns that
+  collapse to one on a narrow panel — `.opts`): Controls = Cube rotation (default) / Layer turns /
+  Both / None; Central cell = Solid (default) / Wireframe; Side cells = Semitransparent (default) /
+  Solid / Wireframe / None; *Display* = **Classic view** + Core tesseract checkboxes (default off); a
+  ***Classic view*** group (styled like the others) = **Outer cell** (keep the outer core cell, default
+  off) + **Group side cells** (default on) checkboxes, both **disabled while classic is off**
+  (`_updateClassicControls`).
+  Classic is **also** a corner icon button (top-left, opposite the menu button — an unfolded-cube-net
+  glyph; `.active` lights it accent).
 - **Keys** (desktop convenience): `1–8` centre cell · arrows rotate view · `R` reset puzzle
   · `V` reset view · `W` toggle Central cell solid↔wireframe · `U`/`Shift+U` undo/redo. Pointer drag on the
   centred cube swipes a layer (above); drag on the background/tiles orbits; tap a sub-view
@@ -274,9 +329,10 @@ The session survives a refresh / reopened tab via `localStorage` (key
 `rubiks-tesseract/state/v1`). What's saved: the **puzzle** (only the mutable cubie fields —
 `pos4`, `faceDirs`, `orient`; the solved scaffold is rebuilt by `buildSolvedPuzzle` in the
 same deterministic order, so `restoreCubies` just overwrites those three per cubie), the
-**central cell index**, and the **settings** (speed-slider value, control set, the three
-presentation settings — central mode, side mode, core-wireframe flag). A legacy saved
-`viewMode` (`total-wire`) migrates to the equivalent triplet on load.
+**central cell index**, and the **settings** (speed-slider value, control set, the
+presentation settings — central mode, side mode, core-wireframe flag, and the classic-view flags:
+`classic`, `keepOuter`, `groupSides`). A legacy saved `viewMode` (`total-wire`) migrates on load.
+The classic flag restores settled (`classicT = classic ? 1 : 0`, never mid-tween).
 
 - **Central cell is stored as an index, not a frame.** On load `coreFrame = frameForCell(central)`
   — the canonical frame — so restore lands on the exact stable orientation the centering

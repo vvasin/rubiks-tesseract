@@ -21,11 +21,17 @@ const SAVE_DEBOUNCE = 500;                     // ms to coalesce persistence wri
 // solid or as wireframe; the side cells draw as wireframe or not at all; the core-tesseract
 // wireframe is a separate overlay. (The old single shell-wire/total-wire mode is migrated.)
 const CENTRAL_MODES = ['solid', 'wire'];
-const SIDE_MODES    = ['semi', 'wire', 'none'];
+const SIDE_MODES    = ['semi', 'solid', 'wire', 'none'];
 const SIDE_ALPHA    = 0.4;                     // opacity floor for the 'semi' side cells —
                                               // carried order-independently by the shader's
                                               // ordered (Bayer) screen-door dither
+// Per side mode, the opacity floor passed to computeCells: 'semi' = translucent frosted
+// floor, 'solid' = fully opaque side cells (needed for the authentic classic view), and
+// 'wire'/'none' use 0 (handled by the wireframe/skip paths instead).
+const SIDE_FLOOR    = { semi: SIDE_ALPHA, solid: 1.0, wire: 0, none: 0 };
 const CONTROL_SETS  = ['central', 'sides', 'both', 'none'];   // 'none' = zen mode (no buttons)
+const CLASSIC_DURATION = 620;                  // ms for the normal↔classic transition (eased,
+                                              // scaled by the animation-speed factor)
 
 // Direct-manipulation swipe (turn the centred cube by dragging across its stickers).
 // A central-cell cubie always projects to a clean grid: pos4·eF = 1 → depthR(1) = 1.35
@@ -60,6 +66,21 @@ class App {
     this.sideMode    = SIDE_MODES.includes(saved?.sideMode) ? saved.sideMode : (legacyTotal ? 'wire' : 'semi');
     this.coreWire    = typeof saved?.coreWire === 'boolean' ? saved.coreWire : legacyTotal;
     this.controlSet = CONTROL_SETS.includes(saved?.controlSet) ? saved.controlSet : 'central';
+    // Classic ("exploded cells", Magic-Cube-4D-style) view — an independent toggle that
+    // pulls the side cells into the core frustums and drops the unused/outer cells. Stored
+    // as a bool; `classicT` is the animated 0→1 transition weight (no mid-animation save).
+    this.classic = typeof saved?.classic === 'boolean' ? saved.classic : false;
+    this.classicT = this.classic ? 1 : 0;
+    this._classicAnim = null;                  // { from, to, start } while transitioning
+    // Whether the outer core-tesseract cell (the big enclosing cube) stays painted/visible in
+    // classic mode. Off (default): it's dropped — and stays black through the transition so it
+    // doesn't flash colour on the way out.
+    this.keepOuter = typeof saved?.keepOuter === 'boolean' ? saved.keepOuter : false;
+    // Whether classic side cells compact into tight per-cell groups (default on) vs the raw
+    // pulled-out spread. Eased by `groupT` (its own tween) so toggling it slides, never snaps.
+    this.groupSides = typeof saved?.groupSides === 'boolean' ? saved.groupSides : true;
+    this.groupT = this.groupSides ? 1 : 0;
+    this._groupAnim = null;
 
     // Turntable view: independent yaw/pitch so horizontal drag never leaks into roll.
     this.viewYaw   = DEFAULT_YAW;
@@ -121,13 +142,39 @@ class App {
     if (this.shuffling && this.anim.isIdle()) this._shuffleStep();
 
     const frame = this.anim.tick(timestamp, this.cubies, this.centralCellIndex);
+    this._tickClassic(timestamp);
+    this._tickGroup(timestamp);
 
-    const busy = !this.anim.isIdle() || !!this.pendingCenter || this.shuffling;
+    const busy = !this.anim.isIdle() || !!this.pendingCenter || this.shuffling
+      || !!this._classicAnim || !!this._groupAnim;
     if (this.dirty || busy) {
       this._render(frame);
       this.dirty = false;
     }
     requestAnimationFrame(ts => this._loop(ts));
+  }
+
+  // Advance the classic-view transition, easing `classicT` toward the target over
+  // CLASSIC_DURATION (scaled by the speed factor, like centering). Returns the weight.
+  _tickClassic(timestamp) {
+    const a = this._classicAnim;
+    if (!a) return this.classicT;
+    const dur = CLASSIC_DURATION / Math.max(0.05, this.anim.speedFactor);
+    let r = (timestamp - a.start) / dur;
+    if (r >= 1) { this.classicT = a.to; this._classicAnim = null; }
+    else { this.classicT = a.from + (a.to - a.from) * easeInOut(Math.max(0, r)); }
+    return this.classicT;
+  }
+
+  // Advance the side-cell grouping transition (same easing/duration as the classic tween).
+  _tickGroup(timestamp) {
+    const a = this._groupAnim;
+    if (!a) return this.groupT;
+    const dur = CLASSIC_DURATION / Math.max(0.05, this.anim.speedFactor);
+    const r = (timestamp - a.start) / dur;
+    if (r >= 1) { this.groupT = a.to; this._groupAnim = null; }
+    else { this.groupT = a.from + (a.to - a.from) * easeInOut(Math.max(0, r)); }
+    return this.groupT;
   }
 
   _render(frame) {
@@ -147,23 +194,29 @@ class App {
     //   wireframe centre → side semi : side solids fade out as the wireframe fades in
     //   wireframe centre → side wire : edges at full opacity throughout — no transition
     //   wireframe centre → side none : edges fade out into nothing
+    // Classic ("exploded cells") rearranges the geometry: the main view pulls side cells
+    // into the core frustums and drops the outer/unused cells; the sub-views keep only
+    // each cell's own inner face. classicT eases the morph; <=0 means plain normal mode.
+    const classicMain = this.classicT > 0 ? { t: this.classicT, mode: 'main', keepOuter: this.keepOuter, group: this.groupT } : null;
+    const classicSub  = this.classicT > 0 ? { t: this.classicT, mode: 'sub' } : null;
+
     const centralWire = this.centralMode === 'wire';
     const sideWire = this.sideMode === 'wire';
-    const sideSemi = this.sideMode === 'semi';
+    const sideFloor = SIDE_FLOOR[this.sideMode] || 0;     // 'semi'/'solid' opacity floor (else 0)
     let cells = [];
     let segments = [];
-    if (sideSemi) {
-      // Translucent side cells, order-independent via the screen-door dither (no sorting,
-      // and the stipple absorbs the central↔side collision z-fighting). The centre stays
-      // a clean opaque solid, or — if set to wireframe — the side solids fade out as a
-      // cubie reaches the focused layer while its wireframe fades in.
-      cells = computeCells(this.cubies, coreFrame, getState, { sideAlpha: SIDE_ALPHA, centralSolid: !centralWire });
-      if (centralWire) segments = computeWireframe(this.cubies, coreFrame, getState, { fade: true });
+    if (sideFloor > 0) {
+      // Floored side cells (translucent 'semi' or fully opaque 'solid'), order-independent
+      // via the screen-door dither. The centre stays a clean opaque solid, or — if set to
+      // wireframe — the side solids fade out as a cubie reaches the focused layer while its
+      // wireframe fades in.
+      cells = computeCells(this.cubies, coreFrame, getState, { sideAlpha: sideFloor, centralSolid: !centralWire, classic: classicMain });
+      if (centralWire) segments = computeWireframe(this.cubies, coreFrame, getState, { fade: true, classic: classicMain });
     } else {
-      cells = centralWire ? [] : computeCells(this.cubies, coreFrame, getState);
-      if (centralWire && sideWire) segments = computeWireframe(this.cubies, coreFrame, getState);
-      else if (centralWire)        segments = computeWireframe(this.cubies, coreFrame, getState, { fade: true });
-      else if (sideWire)           segments = computeWireframe(this.cubies, coreFrame, getState, { skipSolid: true });
+      cells = centralWire ? [] : computeCells(this.cubies, coreFrame, getState, { classic: classicMain });
+      if (centralWire && sideWire) segments = computeWireframe(this.cubies, coreFrame, getState, { classic: classicMain });
+      else if (centralWire)        segments = computeWireframe(this.cubies, coreFrame, getState, { fade: true, classic: classicMain });
+      else if (sideWire)           segments = computeWireframe(this.cubies, coreFrame, getState, { skipSolid: true, classic: classicMain });
     }
     if (this.coreWire) {
       const spinCell = frame && frame.type === 'move' ? frame.cellIndex : -1;
@@ -187,10 +240,10 @@ class App {
     // turn fades to nothing via the same dither.
     for (let i = 0; i < 8; i++) {
       if (centralWire) {
-        const seg = computeWireframe(this.cubies, this.subFrames[i], getState, { fade: true });
+        const seg = computeWireframe(this.cubies, this.subFrames[i], getState, { fade: true, classic: classicSub });
         r.drawView([], this.viewRot, seg, camDist, rectOf(this.tileEls[i]), SUBVIEW_ZOOM);
       } else {
-        const sub = computeCells(this.cubies, this.subFrames[i], getState);
+        const sub = computeCells(this.cubies, this.subFrames[i], getState, { classic: classicSub });
         r.drawView(sub, this.viewRot, null, camDist, rectOf(this.tileEls[i]), SUBVIEW_ZOOM);
       }
     }
@@ -554,6 +607,53 @@ class App {
     this.markDirty();
   }
 
+  // Toggle the classic ("exploded cells") view, animating classicT toward the target.
+  // Reflected into both the settings checkbox and the corner toggle button (accent when on).
+  setClassic(on) {
+    on = !!on;
+    if (on === this.classic && !this._classicAnim) return;
+    this.classic = on;
+    this._classicAnim = { from: this.classicT, to: on ? 1 : 0, start: performance.now() };
+    const box = document.getElementById('classic-toggle');
+    if (box) box.checked = on;
+    const btn = document.getElementById('classic-button');
+    if (btn) btn.classList.toggle('active', on);
+    this._updateClassicControls();
+    this._scheduleSave?.();
+    this.markDirty();
+  }
+
+  // The classic-tuning checkboxes only apply while classic is active, so disable them otherwise.
+  _updateClassicControls() {
+    for (const id of ['outer-cell-toggle', 'group-sides-toggle']) {
+      const box = document.getElementById(id);
+      if (!box) continue;
+      box.disabled = !this.classic;
+      box.closest('label')?.classList.toggle('disabled', !this.classic);
+    }
+  }
+
+  // Keep the painted outer core-tesseract cell visible in classic mode (vs dropping it).
+  setKeepOuter(on) {
+    this.keepOuter = !!on;
+    const box = document.getElementById('outer-cell-toggle');
+    if (box) box.checked = this.keepOuter;
+    this._scheduleSave?.();
+    this.markDirty();
+  }
+
+  // Compact classic side cells into tight per-cell groups (vs the raw pulled-out spread).
+  setGroupSides(on) {
+    on = !!on;
+    if (on === this.groupSides && !this._groupAnim) return;
+    this.groupSides = on;
+    this._groupAnim = { from: this.groupT, to: on ? 1 : 0, start: performance.now() };
+    const box = document.getElementById('group-sides-toggle');
+    if (box) box.checked = on;
+    this._scheduleSave?.();
+    this.markDirty();
+  }
+
   // Keyboard W toggles the central layer between solid and wireframe — the primary
   // visual switch (side/core stay where the menu left them).
   cycleViewMode() {
@@ -578,6 +678,9 @@ class App {
       centralMode: this.centralMode,
       sideMode: this.sideMode,
       coreWire: this.coreWire,
+      classic: this.classic,
+      keepOuter: this.keepOuter,
+      groupSides: this.groupSides,
       controlSet: this.controlSet,
       speed: parseInt(document.getElementById('speed-slider').value),
     };
@@ -596,6 +699,15 @@ class App {
     setRadio('controlset', this.controlSet);
     const coreBox = document.getElementById('core-wire-toggle');
     if (coreBox) coreBox.checked = this.coreWire;
+    const classicBox = document.getElementById('classic-toggle');
+    if (classicBox) classicBox.checked = this.classic;
+    const classicBtn = document.getElementById('classic-button');
+    if (classicBtn) classicBtn.classList.toggle('active', this.classic);
+    const outerBox = document.getElementById('outer-cell-toggle');
+    if (outerBox) outerBox.checked = this.keepOuter;
+    const groupBox = document.getElementById('group-sides-toggle');
+    if (groupBox) groupBox.checked = this.groupSides;
+    this._updateClassicControls();
 
     const slider = document.getElementById('speed-slider');
     const speed = saved?.speed;
@@ -654,6 +766,14 @@ class App {
     }
     document.getElementById('core-wire-toggle')
       .addEventListener('change', e => this.setCoreWire(e.target.checked));
+    document.getElementById('classic-toggle')
+      .addEventListener('change', e => this.setClassic(e.target.checked));
+    document.getElementById('classic-button')
+      .addEventListener('click', () => this.setClassic(!this.classic));
+    document.getElementById('outer-cell-toggle')
+      .addEventListener('change', e => this.setKeepOuter(e.target.checked));
+    document.getElementById('group-sides-toggle')
+      .addEventListener('change', e => this.setGroupSides(e.target.checked));
     for (const radio of document.querySelectorAll('input[name="controlset"]')) {
       radio.addEventListener('change', e => { if (e.target.checked) this.setControlSet(e.target.value); });
     }

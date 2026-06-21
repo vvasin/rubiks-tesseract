@@ -116,6 +116,26 @@ html, body {
   pointer-events: auto;
 }
 
+/* Classic-view toggle — mirrors the menu button in the opposite (top-left) corner.
+   `currentColor` drives the SVG icon; the .active state switches it to the accent. */
+#classic-button {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  width: 40px;
+  height: 40px;
+  padding: 8px;
+  border-radius: 10px;
+  pointer-events: auto;
+  color: var(--text);
+}
+#classic-button svg { width: 100%; height: 100%; display: block; }
+#classic-button.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 0 12px -3px var(--accent);
+}
+
 /* Twist-button groups framing the cube on the 4 stage edges. */
 .turn-group {
   position: absolute;
@@ -174,7 +194,7 @@ button:disabled { opacity: 0.4; cursor: default; }
 }
 
 #menu-panel, #confirm-panel {
-  width: min(92vw, 360px);
+  width: min(92vw, 380px);
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 16px;
@@ -184,8 +204,23 @@ button:disabled { opacity: 0.4; cursor: default; }
   gap: 10px;
   box-shadow: 0 18px 48px -12px #000c;
 }
+/* Cap the panel height and scroll the body so a tall settings list still fits on
+   short / landscape screens (the header stays pinned). */
+#menu-panel { max-height: min(88dvh, 640px); }
+.menu-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  /* room so the scrollbar doesn't overlap the controls */
+  margin-right: -6px;
+  padding-right: 6px;
+}
 
 .menu-head {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -194,13 +229,15 @@ button:disabled { opacity: 0.4; cursor: default; }
 }
 .menu-head button { width: 32px; height: 32px; }
 
+/* Shuffle + Reset side by side, equal width, full row. */
+.menu-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .menu-item {
   padding: 11px 14px;
-  text-align: left;
+  text-align: center;
   font-size: 15px;
 }
 
-.menu-section { display: flex; flex-direction: column; gap: 10px; }
+.menu-section { display: flex; flex-direction: column; gap: 12px; }
 .menu-section h3 {
   font-size: 12px;
   text-transform: uppercase;
@@ -210,11 +247,19 @@ button:disabled { opacity: 0.4; cursor: default; }
 }
 
 .setting { display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
-.setting > span { color: var(--text-dim); font-size: 13px; }
-.radio-list { gap: 7px; }
-.radio-list label { display: flex; align-items: center; gap: 8px; }
-.radio-list label.disabled { color: var(--text-dim); }
-.radio-list em { color: var(--text-dim); font-style: italic; }
+.setting > span, .setting > .legend { color: var(--text-dim); font-size: 13px; }
+/* Each multi-value setting lays its options in two equal columns; flex-wrap + a
+   min-width collapses them to a single column when the panel gets narrow. */
+.opts { display: flex; flex-wrap: wrap; gap: 8px 10px; }
+.opts label {
+  flex: 1 1 calc(50% - 10px);
+  min-width: 120px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.opts label.disabled { color: var(--text-dim); opacity: 0.55; cursor: not-allowed; }
+.opts em { color: var(--text-dim); font-style: italic; }
 
 /* explicit height/margin so the control can't be re-measured (and resize the panel)
    on first interaction in some engines */
