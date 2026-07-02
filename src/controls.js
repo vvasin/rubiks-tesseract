@@ -1,8 +1,9 @@
 // Input handling + DOM builders for the game shell.
 //   • One pointer handler on the canvas decides at press-time what a drag is: starting on
-//     a sticker of the centred cube is a LAYER SWIPE (the edge it exits through picks the
-//     layer + direction — see App.centralStickers / applyCentralSwipe), and once begun it
-//     never orbits; starting on the background or a cell tile orbits all 9 views; a tap on a
+//     a swipe-surface sticker — the centred cube, plus the side-cell clusters in the settled
+//     grouped classic view — is a LAYER SWIPE (the edge it exits through picks the layer +
+//     direction — see App.centralStickers / applyCentralSwipe), and once begun it never
+//     orbits; starting on the background or a cell tile orbits all 9 views; a tap on a
 //     tile centres that cell; two fingers pinch-zoom.
 //   • Builds the 8 cell tiles and the 6 embedded twist buttons.
 import { CELLS } from './puzzle.js';
@@ -56,10 +57,10 @@ export class Controls {
     }
     const cell = this._tileAt(e.clientX, e.clientY);
     // Decide what this drag IS at press-time. On a cell tile (tap-to-centre) or empty
-    // background → 'orbit' (the existing turntable drag). On a sticker of the centred cube
-    // → 'cube' (a layer swipe): we freeze the sticker geometry and will NEVER orbit, even
-    // if the finger wanders off the cube — per the spec, a swipe that starts on the cube
-    // but reaches no neighbour is simply ignored.
+    // background → 'orbit' (the existing turntable drag). On a swipe-surface sticker (the
+    // centred cube, or a classic side-cell cluster) → 'cube' (a layer swipe): we freeze the
+    // sticker geometry and will NEVER orbit, even if the finger wanders off the cube — per
+    // the spec, a swipe that starts on the cube but reaches no neighbour is simply ignored.
     if (cell < 0) {
       const start = this._pickSticker(this.app.centralStickers(), e.clientX, e.clientY);
       if (start) {

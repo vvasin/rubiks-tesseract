@@ -36,7 +36,9 @@ a.viewYaw = -0.6; a.viewPitch = 0.5; a.viewZoom = 1.4; a.viewRot = a._composeVie
 a.anim.speedFactor = 0.1;           // slow animations down to capture mid-transition
 a.executeMove(2, 'XW', +1);         // cellIndex, planeName, sign (any cell/plane)
 a.turnScreenPlane(0, 2, +1);        // twist the CENTRED cell via a screen-plane button (iIdx,jIdx,dir)
-a.centralStickers();                // the ≤27 swipe hit-areas (client-px quads) of the centred cube
+a.centralStickers();                // the swipe hit-areas (client-px quads): the centred cube's ≤27,
+                                    // plus the 6 side cells in settled classic view (grouped
+                                    // clusters or ungrouped layer sheets)
 a.applyCentralSwipe(start, x, y);   // turn the layer a swipe from sticker `start` exits toward (x,y)
 a.selectCentralCell(4);             // animated, stable recentering
 a.shuffle();                        // one-shot scramble (SHUFFLE_TURNS moves, full speed)
@@ -223,14 +225,17 @@ recomputed in the live frame each tick.
 - The **depth blackening is disabled** (`classicColorWeight` lerps `colorWeight`→1): every shown sticker
   reads full colour. The transition uses the **same screen-door dither** (unused/outer cells dissolve;
   side cells morph out). Classic composes with the side mode (opacity/style) — the **authentic** look is
-  Side cells = `solid`; with `semi` the frustums are translucent. The central swipe model is unchanged
-  (the central cube stays at `depthR(1)`).
+  Side cells = `solid`; with `semi` the frustums are translucent. The central cube's swipe model is
+  unchanged (it stays at `depthR(1)`), and once the classic tween has settled the swipe surfaces
+  **extend to the 6 pulled-out side cells** — grouped clusters or ungrouped layer sheets (see
+  "Swipe to turn") — so the controls sit where the stickers actually are.
 - **Outer cell** (*Classic view* group → *Outer cell*; `keepOuter`, default off, main view only). Off:
   the outer core cell (big enclosing cube) is dropped — and `classicColorWeight` keeps it at its normal
   **black** weight while it dithers out, so it doesn't flash its colour mid-transition. On: it isn't
   hidden (`classicHide`→1) and is painted to full colour, so the enclosing cube stays visible. Both
-  *Outer cell* and *Group side cells* live in a *Classic view* settings group, disabled while classic
-  mode is off (`_updateClassicControls`).
+  *Outer cell* and *Group side cells* live in a *Classic view* settings group and stay **enabled even
+  while classic is off** (they only take effect when it's on) — so they can be preconfigured without
+  first enabling the view.
 
 ### Other rendering facts
 
@@ -286,14 +291,32 @@ recomputed in the live frame each tick.
   clearly-targetable ones. **The turn is fixed by which EDGE of the start sticker the swipe exits
   through** — `applyCentralSwipe` expresses the displacement from the sticker centre in that
   sticker's in-face tangent basis (read perspective-correctly off its projected quad); the
-  dominant tangent is the drag axis, the *other* tangent is the rotation axis, the start's coord
-  along it is the slab (0 → `turnMiddle`, ±1 → `turnFace`), and the sign makes the grabbed sticker
-  travel the way the finger went — reusing the exact same move/sign machinery as the buttons.
+  dominant tangent is the drag axis, the *other* tangent is the rotation axis, the start's **logical
+  lattice coord** `g` along it is the slab (0 → `turnMiddle`, ±1 → `turnFace`), and the sign makes the
+  grabbed sticker travel the way the finger went (the drift test is `r̂ × c3` — the sticker's true
+  projected position, not its face normal, so it also holds for surfaces that sit off the rotation
+  axes) — reusing the exact same move/sign machinery as the buttons.
   Keying off the exit edge (not a second sticker) is deliberate: it cleanly handles a swipe that
   **wraps over a cube edge onto another face of the same cubie** (the literal corner case) and one
   that **runs off into empty space**. **Press-time decides the gesture:** a drag begun on a sticker
   only ever turns — it never orbits, and if it never leaves the start sticker it's simply ignored;
   a drag begun on the background/tiles orbits as before.
+  **Classic view sync:** once the classic tween is settled (and the side cells are drawn — side
+  mode ≠ `none`), the 6 pulled-out side cells are ALSO swipe surfaces, in whichever layout classic
+  is showing. **Grouped** (settled `groupT=1`): each cell is an idealized 3×3×3 cluster with
+  `PULL_DIST` spacing centred `CLUSTER_DIST = STICKER_GRID + 2·PULL_DIST` out along its facing axis
+  (exactly where the grouping lattice puts the stickers); dragging across a cluster's side face
+  along the tangent ⊥ its facing axis spins the cluster's own cell in place. **Ungrouped**
+  (`groupT=0`): each cell is three radially-facing 3×3 layer sheets — tangential spread =
+  `depthR(d)` (the layer's shell radius), pulled one depth level out — matching `cubieBoxes`'
+  spread layout. In both, a side-cell sticker's `g` along the facing axis is the cell's **sign**
+  for every sticker (a cell turn moves the whole cell, so the depth layer never picks a different
+  slab), and every drag turns the same `turnFace`/`turnMiddle` hyper-slab the equivalent
+  centred-cube swipe would, the grabbed sheet visibly travelling with the finger toward the
+  neighbouring cell. Only camera-oriented faces are emitted (per-quad `normal·toCam` test), so
+  classic's see-through gaps never expose a rear-facing target; overlaps (e.g. the far cluster
+  behind the centred cube) resolve to the front-most quad. Mid-group-tween or side-`none` classic
+  falls back to the centred cube alone.
 - **Middle slice** (`turnMiddle` → `executeMiddleMove`): rotate the whole **`fAxis=0`
   hyper-slab** — every cubie with `pos4[fAxis]=0` (27: the centred cube's middle layer + the
   adjacent cells' middle slices in that plane), in the slice plane. It's the slab *between*
@@ -314,8 +337,8 @@ recomputed in the live frame each tick.
   Both / None; Central cell = Solid (default) / Wireframe; Side cells = Semitransparent (default) /
   Solid / Wireframe / None; *Display* = **Classic view** + Core tesseract checkboxes (default off); a
   ***Classic view*** group (styled like the others) = **Outer cell** (keep the outer core cell, default
-  off) + **Group side cells** (default on) checkboxes, both **disabled while classic is off**
-  (`_updateClassicControls`).
+  off) + **Group side cells** (default on) checkboxes, both always enabled (they simply have no visible
+  effect until classic is on).
   Classic is **also** a corner icon button (top-left, opposite the menu button — an unfolded-cube-net
   glyph; `.active` lights it accent).
 - **Keys** (desktop convenience): `1–8` centre cell · arrows rotate view · `R` reset puzzle

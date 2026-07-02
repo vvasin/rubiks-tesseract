@@ -85,7 +85,9 @@ function depthR(w) { return 2.8 - 1.45 * w; }   // w=1→1.35, 0→2.8, −1→4
 // One depth level: pulling an inner-layer side cell by this lands it at the level the
 // middle-layer side cells occupy in normal mode (and middle → outer), since depthR is
 // linear so consecutive layers are an equal distance apart.
-const PULL_DIST = depthR(0) - depthR(1);          // = 1.45
+export const PULL_DIST = depthR(0) - depthR(1);   // = 1.45 (also the grouped cluster's
+                                                  // uniform sticker-grid spacing — App's
+                                                  // classic swipe surfaces build on it)
 
 // ── 4D vector helpers ─────────────────────────────────────────────────────────
 

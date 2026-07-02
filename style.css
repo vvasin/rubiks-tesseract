@@ -258,7 +258,6 @@ button:disabled { opacity: 0.4; cursor: default; }
   align-items: center;
   gap: 8px;
 }
-.opts label.disabled { color: var(--text-dim); opacity: 0.55; cursor: not-allowed; }
 .opts em { color: var(--text-dim); font-style: italic; }
 
 /* explicit height/margin so the control can't be re-measured (and resize the panel)
