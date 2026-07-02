@@ -1,7 +1,7 @@
 import { mat3Mul, mat3AxisRotation, mat3MulVec3 } from './math4d.js';
 import { buildSolvedPuzzle, undoMove, CELLS, serializeCubies, restoreCubies } from './puzzle.js';
 import { readState, writeState, debounce } from './persistence.js';
-import { computeCells, computeWireframe, computeCoreWireframe,
+import { computeCells, computeWireframe, computeCoreWireframe, PULL_DIST,
          frameForCell, cloneFrame, slerpFrame, centralFromFrame } from './projection.js';
 import { Renderer } from './renderer.js';
 import { AnimationEngine } from './animation.js';
@@ -38,12 +38,17 @@ const CLASSIC_DURATION = 620;                  // ms for the normal↔classic tr
 // constant, so its free-axis coords land at (g·1.35) along screen x/y/z. We model the
 // centred 3×3×3 as that idealized cube and project it through the renderer's exact camera.
 const STICKER_GRID  = 1.35;                  // central-cube cubie spacing in projected 3D
-const STICKER_HALF  = STICKER_GRID / 2;      // half a cell → stickers tile continuously
 const STICKER_FOV   = Math.PI / 3.2;         // must match renderer's perspective FOV
 const MIN_STICKER_FRAC = 0.0006;             // drop stickers smaller than this fraction of the
                                              // main-view area (edge-on / heavily foreshortened);
                                              // ~0.0006 keeps all 27 readable at rest, dropping only
                                              // slivers as a face turns toward edge-on
+// In the settled GROUPED classic view, each side cell is likewise an ideal 3×3×3 grid:
+// spacing PULL_DIST (the grouping lattice), middle layer one pull past the middle shell —
+// depthR(0)+PULL_DIST along its facing axis, which is STICKER_GRID + 2·PULL_DIST since
+// depthR steps by exactly PULL_DIST per layer. So the swipe surfaces can follow the
+// stickers out to the clusters with the same idealized-cube model as the centred cube.
+const CLUSTER_DIST = STICKER_GRID + 2 * PULL_DIST;   // 4.25 — cluster centre distance
 
 const isCellIndex = v => Number.isInteger(v) && v >= 0 && v < 8;
 
@@ -387,15 +392,27 @@ class App {
     this.markDirty();
   }
 
-  // ── Direct manipulation: swipe across the centred cube to turn a layer ─────────
+  // ── Direct manipulation: swipe across the stickers to turn a layer ─────────────
 
-  // The interaction surface: up to 27 sticker quads of the centred 3×3×3, projected to
-  // CLIENT pixels through the renderer's exact camera (so it tracks orientation + zoom).
-  // Each sticker carries its grid coord `g` (∈{-1,0,1}³ along screen x/y/z), the face it
-  // lives on (axis `a`, sign `sa`), the two in-face tangent axes `t`, and its screen depth
-  // `zc` (smaller = nearer). Back-facing and heavily-foreshortened faces are dropped, so a
-  // swipe only ever lands on a clearly-visible sticker. Returns [] while busy (no geometry
-  // to twist mid-animation) — the caller then falls back to orbiting.
+  // The interaction surface: idealized 3×3×3 sticker grids projected to CLIENT pixels
+  // through the renderer's exact camera (so they track orientation + zoom). Always the
+  // centred cube (up to 27 quads); in the SETTLED, GROUPED classic view also the 6
+  // pulled-out side-cell clusters (spacing PULL_DIST, centred CLUSTER_DIST out along
+  // their facing axis) — the swipe surfaces follow the stickers to where classic draws
+  // them. Each sticker carries its LOGICAL lattice coord `g` along screen x/y/z — the
+  // pos4·e of the cubies it reads on. For the centred cube that is its grid position;
+  // for a cluster the two tangential coords are the in-cluster grid and the facing-axis
+  // coord is the cluster's own sign for EVERY sticker (a cell turn always moves the
+  // whole cell, so a sticker's depth layer never selects a different slab). It also
+  // carries the local face it lives on (axis `a`, sign `sa`), the two in-face tangent
+  // axes `t`, its centre `c3` in projected 3D (pre-view-rotation — the drift-sign lever
+  // arm), its screen depth `zc` (smaller = nearer), and `cluster` ({k, s} or null).
+  // Only faces ORIENTED TO THE CAMERA are emitted (per-quad normal·toCam test) and
+  // heavily-foreshortened ones are dropped, so a swipe only ever lands on a visible
+  // face — classic's see-through gaps never expose a rear-facing swipe target, and a
+  // silhouette overlap (e.g. the far cluster behind the centred cube) resolves to the
+  // front-most quad in the picker. Returns [] while busy (no geometry to twist
+  // mid-animation) — the caller then falls back to orbiting.
   centralStickers() {
     if (this.anim.isBusy() || this.pendingCenter) return [];
     const rect = this.stageEl.getBoundingClientRect();
@@ -415,22 +432,38 @@ class App {
     };
     const minArea = rect.width * rect.height * MIN_STICKER_FRAC;
     const out = [];
-    for (let a = 0; a < 3; a++) for (const sa of [1, -1]) {
-      const [t0, t1] = [0, 1, 2].filter(x => x !== a);
-      const nWorld = mat3MulVec3(R, axisVec(a, sa));    // face normal, view-rotated
-      for (let u = -1; u <= 1; u++) for (let v = -1; v <= 1; v++) {
-        const g = [0, 0, 0]; g[a] = sa; g[t0] = u; g[t1] = v;
-        const fc = [g[0] * STICKER_GRID, g[1] * STICKER_GRID, g[2] * STICKER_GRID];
-        fc[a] += sa * STICKER_HALF;                     // out to the cube surface
-        const cWorld = mat3MulVec3(R, fc);
-        const toCam = [-cWorld[0], -cWorld[1], camDist - cWorld[2]];
-        if (nWorld[0]*toCam[0] + nWorld[1]*toCam[1] + nWorld[2]*toCam[2] <= 0) continue;  // back-facing
-        const poly = [[-1,-1],[1,-1],[1,1],[-1,1]].map(([du, dv]) => {
-          const c = fc.slice(); c[t0] += du * STICKER_HALF; c[t1] += dv * STICKER_HALF;
-          return proj(c);
-        });
-        if (polyArea2(poly) < minArea) continue;        // edge-on / too small to target
-        out.push({ g, a, sa, t: [t0, t1], poly, zc: proj(fc).zc });
+    // One idealized cube: a 3×3×3 sticker grid `spacing` apart centred at `c0`;
+    // `logical` maps a cube-grid coord to the sticker's logical lattice coord.
+    const pushCube = (c0, spacing, logical, cluster) => {
+      const half = spacing / 2;                         // half a cell → stickers tile continuously
+      for (let a = 0; a < 3; a++) for (const sa of [1, -1]) {
+        const [t0, t1] = [0, 1, 2].filter(x => x !== a);
+        const nWorld = mat3MulVec3(R, axisVec(a, sa));  // face normal, view-rotated
+        for (let u = -1; u <= 1; u++) for (let v = -1; v <= 1; v++) {
+          const gc = [0, 0, 0]; gc[a] = sa; gc[t0] = u; gc[t1] = v;
+          const fc = [c0[0] + gc[0] * spacing, c0[1] + gc[1] * spacing, c0[2] + gc[2] * spacing];
+          fc[a] += sa * half;                           // out to the cube surface
+          const cWorld = mat3MulVec3(R, fc);
+          const toCam = [-cWorld[0], -cWorld[1], camDist - cWorld[2]];
+          if (nWorld[0]*toCam[0] + nWorld[1]*toCam[1] + nWorld[2]*toCam[2] <= 0) continue;  // back-facing
+          const poly = [[-1,-1],[1,-1],[1,1],[-1,1]].map(([du, dv]) => {
+            const c = fc.slice(); c[t0] += du * half; c[t1] += dv * half;
+            return proj(c);
+          });
+          if (polyArea2(poly) < minArea) continue;      // edge-on / too small to target
+          out.push({ g: logical(gc), a, sa, t: [t0, t1], poly, zc: proj(fc).zc, c3: fc, cluster });
+        }
+      }
+    };
+    pushCube([0, 0, 0], STICKER_GRID, gc => gc, null);
+    // The classic clusters, once the classic AND grouping tweens have settled (mid-tween
+    // the stickers are in flight, and ungrouped classic has no uniform lattice to model)
+    // and only when the side cells are actually drawn (side mode 'none' hides them, and
+    // an invisible swipe target would just eat orbit drags).
+    if (this.classicT > 0.999 && this.groupT > 0.999 && this.sideMode !== 'none') {
+      for (let k = 0; k < 3; k++) for (const s of [1, -1]) {
+        pushCube(axisVec(k, s * CLUSTER_DIST), PULL_DIST,
+          gc => { const g = gc.slice(); g[k] = s; return g; }, { k, s });
       }
     }
     return out;
@@ -464,8 +497,16 @@ class App {
     if (!delta) return false;
     const tIdx = useT0 ? t0 : t1;             // axis the drag ran along
     const r    = useT0 ? t1 : t0;             // rotation axis = the other tangent
-    const cr = cross3v(axisVec(r, 1), axisVec(start.a, start.sa));   // r̂ × n̂: the face's drift dir
-    const dir = delta * Math.sign(cr[tIdx]);
+    // Drift sign: the sticker's slab rotates rigidly about the r̂ SCREEN axis (through
+    // the origin), so its velocity is dir·(r̂ × c3) — pick dir so the component along the
+    // dragged tangent matches the finger. On the centred cube this reduces exactly to
+    // the old r̂ × n̂ face-normal test (only c3's face-normal component survives along
+    // tIdx); using the true position also covers the classic clusters, whose cubes sit
+    // OFF the tangential rotation axes (there the lever arm is the cluster offset).
+    const cr = cross3v(axisVec(r, 1), start.c3);
+    const dirSign = Math.sign(cr[tIdx]);
+    if (!dirSign) return false;               // degenerate (never for real stickers)
+    const dir = delta * dirSign;
     const slab = start.g[r];
     if (slab === 0) this.turnMiddle(r, dir);
     else this.turnFace(r, slab, dir);
@@ -618,22 +659,13 @@ class App {
     if (box) box.checked = on;
     const btn = document.getElementById('classic-button');
     if (btn) btn.classList.toggle('active', on);
-    this._updateClassicControls();
     this._scheduleSave?.();
     this.markDirty();
   }
 
-  // The classic-tuning checkboxes only apply while classic is active, so disable them otherwise.
-  _updateClassicControls() {
-    for (const id of ['outer-cell-toggle', 'group-sides-toggle']) {
-      const box = document.getElementById(id);
-      if (!box) continue;
-      box.disabled = !this.classic;
-      box.closest('label')?.classList.toggle('disabled', !this.classic);
-    }
-  }
-
   // Keep the painted outer core-tesseract cell visible in classic mode (vs dropping it).
+  // Always available (like Group side cells below): both only SHOW while classic is on,
+  // but keeping them editable saves a round-trip through enabling classic first.
   setKeepOuter(on) {
     this.keepOuter = !!on;
     const box = document.getElementById('outer-cell-toggle');
@@ -707,7 +739,6 @@ class App {
     if (outerBox) outerBox.checked = this.keepOuter;
     const groupBox = document.getElementById('group-sides-toggle');
     if (groupBox) groupBox.checked = this.groupSides;
-    this._updateClassicControls();
 
     const slider = document.getElementById('speed-slider');
     const speed = saved?.speed;
