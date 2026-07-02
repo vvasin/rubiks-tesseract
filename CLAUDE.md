@@ -37,7 +37,8 @@ a.anim.speedFactor = 0.1;           // slow animations down to capture mid-trans
 a.executeMove(2, 'XW', +1);         // cellIndex, planeName, sign (any cell/plane)
 a.turnScreenPlane(0, 2, +1);        // twist the CENTRED cell via a screen-plane button (iIdx,jIdx,dir)
 a.centralStickers();                // the swipe hit-areas (client-px quads): the centred cube's ≤27,
-                                    // plus the 6 side-cell clusters in settled grouped classic view
+                                    // plus the 6 side cells in settled classic view (grouped
+                                    // clusters or ungrouped layer sheets)
 a.applyCentralSwipe(start, x, y);   // turn the layer a swipe from sticker `start` exits toward (x,y)
 a.selectCentralCell(4);             // animated, stable recentering
 a.shuffle();                        // one-shot scramble (SHUFFLE_TURNS moves, full speed)
@@ -225,9 +226,9 @@ recomputed in the live frame each tick.
   reads full colour. The transition uses the **same screen-door dither** (unused/outer cells dissolve;
   side cells morph out). Classic composes with the side mode (opacity/style) — the **authentic** look is
   Side cells = `solid`; with `semi` the frustums are translucent. The central cube's swipe model is
-  unchanged (it stays at `depthR(1)`), and once the classic **and** grouping tweens have settled the
-  swipe surfaces **extend to the 6 clusters** (see "Swipe to turn") so the controls sit where the
-  stickers actually are.
+  unchanged (it stays at `depthR(1)`), and once the classic tween has settled the swipe surfaces
+  **extend to the 6 pulled-out side cells** — grouped clusters or ungrouped layer sheets (see
+  "Swipe to turn") — so the controls sit where the stickers actually are.
 - **Outer cell** (*Classic view* group → *Outer cell*; `keepOuter`, default off, main view only). Off:
   the outer core cell (big enclosing cube) is dropped — and `classicColorWeight` keeps it at its normal
   **black** weight while it dithers out, so it doesn't flash its colour mid-transition. On: it isn't
@@ -300,18 +301,22 @@ recomputed in the live frame each tick.
   that **runs off into empty space**. **Press-time decides the gesture:** a drag begun on a sticker
   only ever turns — it never orbits, and if it never leaves the start sticker it's simply ignored;
   a drag begun on the background/tiles orbits as before.
-  **Classic view sync:** once the classic **and** grouping tweens are settled (and the side cells are
-  drawn — side mode ≠ `none`), the 6 grouped clusters are ALSO swipe surfaces: each is an idealized
-  3×3×3 with `PULL_DIST` spacing centred `CLUSTER_DIST = STICKER_GRID + 2·PULL_DIST` out along its
-  facing axis (exactly where the grouping lattice puts the stickers). A cluster sticker's `g` along
-  the facing axis is the cluster's **sign** for every sticker (a cell turn moves the whole cell, so
-  the depth layer never picks a different slab): dragging across a cluster's side face along the
-  tangent ⊥ its facing axis spins the cluster's own cell in place; every other drag turns the same
-  `turnFace`/`turnMiddle` hyper-slab the equivalent centred-cube swipe would, and the sheet visibly
-  travels with the finger toward the neighbouring cluster. Only camera-oriented faces are emitted
-  (per-quad `normal·toCam` test), so classic's see-through gaps never expose a rear-facing target;
-  overlaps (e.g. the far cluster behind the centred cube) resolve to the front-most quad. Mid-tween,
-  ungrouped, or side-`none` classic falls back to the centred cube alone.
+  **Classic view sync:** once the classic tween is settled (and the side cells are drawn — side
+  mode ≠ `none`), the 6 pulled-out side cells are ALSO swipe surfaces, in whichever layout classic
+  is showing. **Grouped** (settled `groupT=1`): each cell is an idealized 3×3×3 cluster with
+  `PULL_DIST` spacing centred `CLUSTER_DIST = STICKER_GRID + 2·PULL_DIST` out along its facing axis
+  (exactly where the grouping lattice puts the stickers); dragging across a cluster's side face
+  along the tangent ⊥ its facing axis spins the cluster's own cell in place. **Ungrouped**
+  (`groupT=0`): each cell is three radially-facing 3×3 layer sheets — tangential spread =
+  `depthR(d)` (the layer's shell radius), pulled one depth level out — matching `cubieBoxes`'
+  spread layout. In both, a side-cell sticker's `g` along the facing axis is the cell's **sign**
+  for every sticker (a cell turn moves the whole cell, so the depth layer never picks a different
+  slab), and every drag turns the same `turnFace`/`turnMiddle` hyper-slab the equivalent
+  centred-cube swipe would, the grabbed sheet visibly travelling with the finger toward the
+  neighbouring cell. Only camera-oriented faces are emitted (per-quad `normal·toCam` test), so
+  classic's see-through gaps never expose a rear-facing target; overlaps (e.g. the far cluster
+  behind the centred cube) resolve to the front-most quad. Mid-group-tween or side-`none` classic
+  falls back to the centred cube alone.
 - **Middle slice** (`turnMiddle` → `executeMiddleMove`): rotate the whole **`fAxis=0`
   hyper-slab** — every cubie with `pos4[fAxis]=0` (27: the centred cube's middle layer + the
   adjacent cells' middle slices in that plane), in the slice plane. It's the slab *between*

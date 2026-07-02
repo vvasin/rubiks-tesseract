@@ -394,19 +394,20 @@ class App {
 
   // ── Direct manipulation: swipe across the stickers to turn a layer ─────────────
 
-  // The interaction surface: idealized 3×3×3 sticker grids projected to CLIENT pixels
-  // through the renderer's exact camera (so they track orientation + zoom). Always the
-  // centred cube (up to 27 quads); in the SETTLED, GROUPED classic view also the 6
-  // pulled-out side-cell clusters (spacing PULL_DIST, centred CLUSTER_DIST out along
-  // their facing axis) — the swipe surfaces follow the stickers to where classic draws
+  // The interaction surface: idealized sticker grids projected to CLIENT pixels through
+  // the renderer's exact camera (so they track orientation + zoom). Always the centred
+  // cube (up to 27 quads); in the SETTLED classic view also the 6 pulled-out side cells —
+  // as compact 3×3×3 cluster cubes when grouping is on (spacing PULL_DIST, centred
+  // CLUSTER_DIST out along the facing axis), or as the three spread layer sheets per cell
+  // when it is off — so the swipe surfaces follow the stickers to wherever classic draws
   // them. Each sticker carries its LOGICAL lattice coord `g` along screen x/y/z — the
   // pos4·e of the cubies it reads on. For the centred cube that is its grid position;
-  // for a cluster the two tangential coords are the in-cluster grid and the facing-axis
-  // coord is the cluster's own sign for EVERY sticker (a cell turn always moves the
-  // whole cell, so a sticker's depth layer never selects a different slab). It also
-  // carries the local face it lives on (axis `a`, sign `sa`), the two in-face tangent
-  // axes `t`, its centre `c3` in projected 3D (pre-view-rotation — the drift-sign lever
-  // arm), its screen depth `zc` (smaller = nearer), and `cluster` ({k, s} or null).
+  // for a side cell the two tangential coords are the in-face grid and the facing-axis
+  // coord is the cell's own sign for EVERY sticker (a cell turn always moves the whole
+  // cell, so a sticker's depth layer never selects a different slab). It also carries
+  // the local face it lives on (axis `a`, sign `sa`), the two in-face tangent axes `t`,
+  // its centre `c3` in projected 3D (pre-view-rotation — the drift-sign lever arm), its
+  // screen depth `zc` (smaller = nearer), and `cluster` ({k, s} or null).
   // Only faces ORIENTED TO THE CAMERA are emitted (per-quad normal·toCam test) and
   // heavily-foreshortened ones are dropped, so a swipe only ever lands on a visible
   // face — classic's see-through gaps never expose a rear-facing swipe target, and a
@@ -432,38 +433,67 @@ class App {
     };
     const minArea = rect.width * rect.height * MIN_STICKER_FRAC;
     const out = [];
+    // One sticker quad: centre `fc` (projected 3D), face-normal axis `a` (sign `sa`),
+    // in-face tangent axes t0/t1 with half-size `half`, logical lattice coord `g`.
+    // Only camera-oriented faces are emitted, so classic's see-through gaps never
+    // expose a rear-facing swipe target.
+    const pushQuad = (fc, a, sa, t0, t1, half, g, cluster) => {
+      const nWorld = mat3MulVec3(R, axisVec(a, sa));    // face normal, view-rotated
+      const cWorld = mat3MulVec3(R, fc);
+      const toCam = [-cWorld[0], -cWorld[1], camDist - cWorld[2]];
+      if (nWorld[0]*toCam[0] + nWorld[1]*toCam[1] + nWorld[2]*toCam[2] <= 0) return;  // back-facing
+      const poly = [[-1,-1],[1,-1],[1,1],[-1,1]].map(([du, dv]) => {
+        const c = fc.slice(); c[t0] += du * half; c[t1] += dv * half;
+        return proj(c);
+      });
+      if (polyArea2(poly) < minArea) return;            // edge-on / too small to target
+      out.push({ g, a, sa, t: [t0, t1], poly, zc: proj(fc).zc, c3: fc, cluster });
+    };
     // One idealized cube: a 3×3×3 sticker grid `spacing` apart centred at `c0`;
     // `logical` maps a cube-grid coord to the sticker's logical lattice coord.
     const pushCube = (c0, spacing, logical, cluster) => {
       const half = spacing / 2;                         // half a cell → stickers tile continuously
       for (let a = 0; a < 3; a++) for (const sa of [1, -1]) {
         const [t0, t1] = [0, 1, 2].filter(x => x !== a);
-        const nWorld = mat3MulVec3(R, axisVec(a, sa));  // face normal, view-rotated
         for (let u = -1; u <= 1; u++) for (let v = -1; v <= 1; v++) {
           const gc = [0, 0, 0]; gc[a] = sa; gc[t0] = u; gc[t1] = v;
           const fc = [c0[0] + gc[0] * spacing, c0[1] + gc[1] * spacing, c0[2] + gc[2] * spacing];
           fc[a] += sa * half;                           // out to the cube surface
-          const cWorld = mat3MulVec3(R, fc);
-          const toCam = [-cWorld[0], -cWorld[1], camDist - cWorld[2]];
-          if (nWorld[0]*toCam[0] + nWorld[1]*toCam[1] + nWorld[2]*toCam[2] <= 0) continue;  // back-facing
-          const poly = [[-1,-1],[1,-1],[1,1],[-1,1]].map(([du, dv]) => {
-            const c = fc.slice(); c[t0] += du * half; c[t1] += dv * half;
-            return proj(c);
-          });
-          if (polyArea2(poly) < minArea) continue;      // edge-on / too small to target
-          out.push({ g: logical(gc), a, sa, t: [t0, t1], poly, zc: proj(fc).zc, c3: fc, cluster });
+          pushQuad(fc, a, sa, t0, t1, half, logical(gc), cluster);
+        }
+      }
+    };
+    // UNGROUPED classic: side cell (k, s) is three radially-facing 3×3 SHEETS, one per
+    // depth layer d — tangential spread = that layer's shell radius depthR(d) (the cubies'
+    // projected grid), pulled one depth level outward — exactly where cubieBoxes puts the
+    // pulled, ungrouped side stickers. Sheet quads tile each layer continuously; the
+    // facing-axis logical coord is the cell's sign, like every cluster sticker.
+    const pushSheets = (k, s) => {
+      const [t0, t1] = [0, 1, 2].filter(x => x !== k);
+      for (const d of [1, 0, -1]) {
+        const spread = STICKER_GRID + (1 - d) * PULL_DIST;   // = depthR(d): layer shell radius
+        const radial = spread + PULL_DIST;                   // pulled one depth level out
+        for (let u = -1; u <= 1; u++) for (let v = -1; v <= 1; v++) {
+          const fc = [0, 0, 0];
+          fc[k] = s * radial; fc[t0] = u * spread; fc[t1] = v * spread;
+          const g = [0, 0, 0]; g[k] = s; g[t0] = u; g[t1] = v;
+          pushQuad(fc, k, s, t0, t1, spread / 2, g, { k, s });
         }
       }
     };
     pushCube([0, 0, 0], STICKER_GRID, gc => gc, null);
-    // The classic clusters, once the classic AND grouping tweens have settled (mid-tween
-    // the stickers are in flight, and ungrouped classic has no uniform lattice to model)
-    // and only when the side cells are actually drawn (side mode 'none' hides them, and
-    // an invisible swipe target would just eat orbit drags).
-    if (this.classicT > 0.999 && this.groupT > 0.999 && this.sideMode !== 'none') {
+    // The classic side cells, once the classic tween has settled (mid-tween the stickers
+    // are in flight) and only when they are actually drawn (side mode 'none' hides them,
+    // and an invisible swipe target would just eat orbit drags). Grouped → compact cluster
+    // cubes; ungrouped → the spread layer sheets; mid-GROUP-tween → centred cube only.
+    if (this.classicT > 0.999 && this.sideMode !== 'none') {
       for (let k = 0; k < 3; k++) for (const s of [1, -1]) {
-        pushCube(axisVec(k, s * CLUSTER_DIST), PULL_DIST,
-          gc => { const g = gc.slice(); g[k] = s; return g; }, { k, s });
+        if (this.groupT > 0.999) {
+          pushCube(axisVec(k, s * CLUSTER_DIST), PULL_DIST,
+            gc => { const g = gc.slice(); g[k] = s; return g; }, { k, s });
+        } else if (this.groupT < 0.001) {
+          pushSheets(k, s);
+        }
       }
     }
     return out;

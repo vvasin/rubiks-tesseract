@@ -431,17 +431,50 @@ test('classic view: swipe surfaces follow the stickers out to the grouped side-c
   expect(res.cubies).not.toBe(before);
   expect(res.yaw).toBe(sw.yaw);
 
-  // The clusters are only offered while the grouped classic layout is actually shown:
-  // ungrouped, hidden sides, or classic off all fall back to the centred cube alone.
+  // UNGROUPED classic: the side cells become spread layer sheets — still swipeable, all
+  // radially-facing (a === facing axis), and a sheet drag turns the slab its logical
+  // coord names about the other tangent, exactly like the equivalent centred-cube swipe.
+  const sheets = await page.evaluate(() => {
+    const a = window.__app;
+    a.groupT = 0; a._groupAnim = null; a.groupSides = false;
+    const st = a.centralStickers();
+    const sheet = st.filter(s => s.cluster);
+    const calls = [];
+    const origFace = a.turnFace.bind(a), origMid = a.turnMiddle.bind(a);
+    a.turnFace = (k, s, d) => calls.push(['face', k, s, d]);
+    a.turnMiddle = (k, d) => calls.push(['mid', k, d]);
+    const s = sheet[0];
+    const c = s.poly;
+    const cx = (c[0].x + c[1].x + c[2].x + c[3].x) / 4, cy = (c[0].y + c[1].y + c[2].y + c[3].y) / 4;
+    const ux = (c[1].x + c[2].x - c[0].x - c[3].x) / 2, uy = (c[1].y + c[2].y - c[0].y - c[3].y) / 2;
+    const ok = a.applyCentralSwipe(s, cx + 1.5 * ux, cy + 1.5 * uy);   // drag along +t0 → axis t1
+    a.turnFace = origFace; a.turnMiddle = origMid;
+    const r = s.t[1], slab = s.g[r];
+    return {
+      count: sheet.length,
+      distinct: [...new Set(sheet.map(x => x.cluster.k + ':' + x.cluster.s))].length,
+      radialOnly: sheet.every(x => x.a === x.cluster.k && x.sa === x.cluster.s),
+      got: ok && calls.length === 1 ? calls[0] : null,
+      want: slab === 0 ? ['mid', r] : ['face', r, slab],
+    };
+  });
+  expect(sheets.count).toBeGreaterThan(30);
+  expect(sheets.distinct).toBeGreaterThanOrEqual(3);   // far cells are back-facing — culled
+  expect(sheets.radialOnly).toBe(true);
+  expect(sheets.got).not.toBeNull();
+  expect(sheets.got.slice(0, sheets.want.length)).toEqual(sheets.want);
+
+  // The side-cell surfaces are only offered while the settled classic layout is shown:
+  // mid-group-tween, hidden sides, or classic off all fall back to the centred cube alone.
   const gates = await page.evaluate(() => {
     const a = window.__app;
     const clusterCount = () => a.centralStickers().filter(s => s.cluster).length;
-    a.groupT = 0; const ungrouped = clusterCount(); a.groupT = 1;
+    a.groupT = 0.5; const midTween = clusterCount(); a.groupT = 1; a.groupSides = true;
     a.setSideMode('none'); const hiddenSides = clusterCount(); a.setSideMode('solid');
     a.setClassic(false); a.classicT = 0; a._classicAnim = null;
-    return { ungrouped, hiddenSides, off: clusterCount() };
+    return { midTween, hiddenSides, off: clusterCount() };
   });
-  expect(gates).toEqual({ ungrouped: 0, hiddenSides: 0, off: 0 });
+  expect(gates).toEqual({ midTween: 0, hiddenSides: 0, off: 0 });
   expect(errors).toEqual([]);
 });
 
